@@ -1,0 +1,13 @@
+[project]
+name = "modrnn"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ipython>=8.38.0",
+    "matplotlib>=3.10.8",
+    "numpy<2",
+    "torch==2.2",
+    "tqdm>=4.67.1",
+]
