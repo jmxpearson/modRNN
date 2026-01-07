@@ -262,6 +262,7 @@ def collate_variable_length_trials(batch):
     """
     Custom collate function to handle variable-length trials.
     Pads sequences to the maximum length in the batch.
+    Target outputs are padded with their final value (not zeros).
     
     Args:
         batch: List of (inputs, target) tuples
@@ -288,6 +289,11 @@ def collate_variable_length_trials(batch):
         seq_len = inp.shape[0]
         inputs_padded[i, :seq_len, :] = inp
         targets_padded[i, :seq_len] = tgt
+        
+        # Pad target with its final value instead of zeros
+        if seq_len < max_len:
+            final_value = tgt[-1]
+            targets_padded[i, seq_len:] = final_value
     
     return inputs_padded, targets_padded, lengths
 

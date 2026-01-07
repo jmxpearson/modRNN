@@ -106,7 +106,7 @@ class Trainer:
         task_losses = []
         reg_losses = []
         
-        for batch_inputs, batch_targets, batch_lengths, batch_predom_colors, batch_empirical_coherences in tqdm(self.train_loader, desc='Training'):
+        for batch_inputs, batch_targets, batch_lengths in tqdm(self.train_loader, desc='Training'):
             # Move to device
             batch_inputs = batch_inputs.to(self.device)
             batch_targets = batch_targets.to(self.device)
