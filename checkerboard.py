@@ -32,8 +32,8 @@ class DelayedMatchToEvidenceDataset(Dataset):
         coherence_min: float = 0.55,
         coherence_max: float = 0.95,
         coherence_rate: float = -9.0,  # exponential rate parameter
-        gain_values: list = None,  # [0.67, 1.0, 1.25]
-        gain_probs: list = None,  # [0.3, 0.4, 0.3]
+        gain_values: Optional[list] = None,  # [0.67, 1.0, 1.25]
+        gain_probs: Optional[list] = None,  # [0.3, 0.4, 0.3]
         n_checkerboard_channels: int = 10,  # Number of fixed checker channels
         seed: Optional[int] = None
     ):
@@ -275,7 +275,7 @@ def collate_variable_length_trials(batch):
     
     # Get lengths
     lengths = torch.tensor([inp.shape[0] for inp in inputs_list])
-    max_len = lengths.max().item()
+    max_len = int(lengths.max().item())
     batch_size = len(inputs_list)
     n_features = inputs_list[0].shape[1]
     
@@ -429,7 +429,7 @@ def plot_trials(
     
     # Add colorbar
     fig.subplots_adjust(right=0.92)
-    cbar_ax = fig.add_axes([0.94, 0.15, 0.02, 0.7])
+    cbar_ax = fig.add_axes((0.94, 0.15, 0.02, 0.7))
     cbar = fig.colorbar(im, cax=cbar_ax)
     cbar.set_label('Activity', rotation=270, labelpad=20)
     
@@ -467,16 +467,12 @@ def plot_trial_detailed(
     
     fig, axes = plt.subplots(6, 1, figsize=figsize, sharex=True)
     
-    # Generate feature names dynamically
-    feature_names = ['Sample Cue', 'Delay Cue', 'Test Cue']
-    feature_names += [f'Checker {i}' for i in range(min(3, dataset.n_checkerboard_channels))]
-    feature_names += ['Target Output']
-    
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#e377c2', '#d62728']
     
     # Plot first 3 cue features
+    cue_names = ['Sample Cue', 'Delay Cue', 'Test Cue']
     for i in range(3):
-        name, color = feature_names[i], colors[i]
+        name, color = cue_names[i], colors[i]
         axes[i].plot(time_axis, inputs_np[:, i], color=color, linewidth=2)
         axes[i].fill_between(
             time_axis, 
@@ -543,7 +539,7 @@ def plot_trial_detailed(
         color=colors[5], 
         alpha=0.3
     )
-    axes[5].set_ylabel(feature_names[5], fontsize=11, fontweight='bold')
+    axes[5].set_ylabel('Target Output', fontsize=11, fontweight='bold')
     axes[5].set_ylim(-1.2, 1.2)
     axes[5].axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
     axes[5].grid(True, alpha=0.3)
