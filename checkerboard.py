@@ -162,7 +162,8 @@ class DelayedMatchToEvidenceDataset(Dataset):
         delay_cue[sample_end_idx:delay_end_idx] = 1.0
         
         # Test period: test stimuli revealed
-        test_cue[delay_end_idx:test_end_idx] = 1.0
+        # test_cue[delay_end_idx:test_end_idx] = 1.0
+        test_cue[delay_end_idx:] = 1.0
         
         # Target output: -1 (choose black) or +1 (choose white) during test and arm
         # The correct choice matches the predominant color
@@ -174,15 +175,22 @@ class DelayedMatchToEvidenceDataset(Dataset):
         # Randomize test stimulus sides (which side has black vs white)
         test_side = np.random.randint(0, 2)  # 0=left, 1=right
         
-        # Determine correct choice side based on predom color and test arrangement
-        if (predom_color == 0 and test_side == 0) or (predom_color == 1 and test_side == 1):
-            correct_side = 0  # Left
-        else:
-            correct_side = 1  # Right
-        
         # Calculate empirical coherence from the fixed checkers
         n_predom = np.sum(fixed_checkers == predom_color)
         empirical_coherence = n_predom / len(fixed_checkers)
+        
+        # choose correct answer based on actual predominant checker color
+        if n_predom >= self.n_checkerboard_channels - n_predom:
+            empirical_predom_color = predom_color
+        else:
+            empirical_predom_color = 1 - predom_color
+
+
+        # Determine correct choice side based on predom color and test arrangement
+        if (empirical_predom_color == 0 and test_side == 0) or (empirical_predom_color == 1 and test_side == 1):
+            correct_side = 0  # Left
+        else:
+            correct_side = 1  # Right
         
         return {
             'sample_cue': sample_cue,
@@ -263,6 +271,7 @@ def collate_variable_length_trials(batch):
     Custom collate function to handle variable-length trials.
     Pads sequences to the maximum length in the batch.
     Target outputs are padded with their final value (not zeros).
+    All inputs are padded with their final values through trial end.
     
     Args:
         batch: List of (inputs, target) tuples
@@ -294,6 +303,10 @@ def collate_variable_length_trials(batch):
         if seq_len < max_len:
             final_value = tgt[-1]
             targets_padded[i, seq_len:] = final_value
+            
+            # Optionally, you could extend all final inputs:
+            final_value = inp[-1]
+            inputs_padded[i, seq_len:, :] = final_value
     
     return inputs_padded, targets_padded, lengths
 
