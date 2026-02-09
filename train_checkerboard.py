@@ -10,7 +10,7 @@ import json
 from tqdm import tqdm
 
 # Import from other files
-from checkerboard import DelayedMatchToEvidenceDataset, create_dataloaders
+from checkerboard import DelayedMatchToEvidenceDataset, create_dataloaders, collate_variable_length_trials
 from model import RateRNN
 
 
@@ -18,7 +18,7 @@ class Trainer:
     """
     Trainer class for the rate-based RNN on the delayed match-to-evidence task.
     """
-    
+
     def __init__(
         self,
         model: RateRNN,
@@ -26,7 +26,10 @@ class Trainer:
         val_loader: DataLoader,
         optimizer: torch.optim.Optimizer,
         device: str = 'cpu',
-        save_dir: str = './checkpoints'
+        save_dir: str = './checkpoints',
+        train_trials: int = 2000,
+        batch_size: int = 32,
+        dataset_kwargs: Optional[Dict] = None
     ):
         """
         Args:
@@ -36,6 +39,9 @@ class Trainer:
             optimizer: Optimizer
             device: 'cpu' or 'cuda'
             save_dir: Directory to save checkpoints
+            train_trials: Number of training trials per epoch
+            batch_size: Batch size for training
+            dataset_kwargs: Additional kwargs for dataset creation
         """
         self.model = model
         self.train_loader = train_loader
@@ -43,6 +49,11 @@ class Trainer:
         self.optimizer = optimizer
         self.device = device
         self.save_dir = Path(save_dir)
+
+        # Store parameters for regenerating training data each epoch
+        self.train_trials = train_trials
+        self.batch_size = batch_size
+        self.dataset_kwargs = dataset_kwargs if dataset_kwargs is not None else {}
         self.save_dir.mkdir(parents=True, exist_ok=True)
         
         # Loss function: MSE between model output and target
@@ -53,13 +64,28 @@ class Trainer:
             'train_loss': [],
             'train_task_loss': [],
             'train_reg_loss': [],
+            'train_accuracy': [],
             'val_loss': [],
             'val_accuracy': [],
             'learning_rate': []
         }
         
         self.best_val_loss = float('inf')
-    
+
+    def _regenerate_train_loader(self, seed: int):
+        """Regenerate training dataset with a new seed."""
+        train_dataset = DelayedMatchToEvidenceDataset(
+            n_trials=self.train_trials,
+            seed=seed,
+            **self.dataset_kwargs
+        )
+        self.train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            collate_fn=collate_variable_length_trials
+        )
+
     def masked_loss(
         self, 
         outputs: torch.Tensor, 
@@ -92,61 +118,79 @@ class Trainer:
         
         return total_loss / total_valid if total_valid > 0 else total_loss
     
-    def train_epoch(self) -> Tuple[float, float, float]:
+    def train_epoch(self) -> Tuple[float, float, float, float]:
         """
         Train for one epoch.
-        
+
         Returns:
             avg_total_loss: Average total loss
             avg_task_loss: Average task loss (MSE)
             avg_reg_loss: Average regularization loss
+            accuracy: Training accuracy
         """
         self.model.train()
         total_losses = []
         task_losses = []
         reg_losses = []
-        
+        correct = 0
+        total = 0
+
         for batch_inputs, batch_targets, batch_lengths in tqdm(self.train_loader, desc='Training'):
             # Move to device
             batch_inputs = batch_inputs.to(self.device)
             batch_targets = batch_targets.to(self.device)
             batch_lengths = batch_lengths.to(self.device)
             # Note: we don't need predom_colors or empirical_coherences for training loss
-            
+
             # Zero gradients
             self.optimizer.zero_grad()
-            
+
             # Forward pass
             outputs, _ = self.model(batch_inputs)  # (batch, time)
-            
+
             # Compute task loss with masking
             task_loss = self.masked_loss(outputs, batch_targets, batch_lengths)
-            
+
             # Compute regularization loss
             reg_loss = self.model.compute_regularization_loss()
-            
+
             # Total loss
             total_loss = task_loss + reg_loss
-            
+
             # Backward pass
             total_loss.backward()
-            
+
             # Apply Dale's law constraint if enabled
             if self.model.dale_mask is not None:
                 self.model.apply_dale_constraint()
-            
+
             # Gradient clipping (optional but recommended)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
+
             # Update weights
             self.optimizer.step()
-            
+
             # Record losses
             total_losses.append(total_loss.item())
             task_losses.append(task_loss.item())
             reg_losses.append(reg_loss.item())
-        
-        return float(np.mean(total_losses)), float(np.mean(task_losses)), float(np.mean(reg_losses))
+
+            # Compute accuracy based on final output (during test/choice period)
+            with torch.no_grad():
+                for i in range(outputs.size(0)):
+                    seq_len = batch_lengths[i].item()
+                    final_output = outputs[i, seq_len - 1]
+                    final_target = batch_targets[i, seq_len - 1]
+
+                    prediction = torch.sign(final_output)
+                    target_sign = torch.sign(final_target)
+
+                    if prediction == target_sign:
+                        correct += 1
+                    total += 1
+
+        accuracy = correct / total if total > 0 else 0.0
+        return float(np.mean(total_losses)), float(np.mean(task_losses)), float(np.mean(reg_losses)), float(accuracy)
     
     def validate(self) -> Tuple[float, float]:
         """
@@ -215,12 +259,16 @@ class Trainer:
         
         for epoch in range(1, n_epochs + 1):
             print(f"\nEpoch {epoch}/{n_epochs}")
-            
+
+            # Regenerate training data with a new seed each epoch
+            self._regenerate_train_loader(seed=epoch * 1000)
+
             # Train
-            train_loss, task_loss, reg_loss = self.train_epoch()
+            train_loss, task_loss, reg_loss, train_accuracy = self.train_epoch()
             self.history['train_loss'].append(train_loss)
             self.history['train_task_loss'].append(task_loss)
             self.history['train_reg_loss'].append(reg_loss)
+            self.history['train_accuracy'].append(train_accuracy)
             
             # Check for NaN
             if np.isnan(train_loss):
@@ -238,7 +286,8 @@ class Trainer:
             
             # Print progress
             print(f"Train Loss: {train_loss:.4f} (Task: {task_loss:.4f}, Reg: {reg_loss:.6f})")
-            print(f"Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
+            print(f"Val Loss: {val_loss:.4f}")
+            print(f"Train Accuracy: {train_accuracy:.4f}, Val Accuracy: {val_accuracy:.4f}")
             print(f"Learning Rate: {current_lr:.6f}")
             
             # Update learning rate scheduler
@@ -288,45 +337,49 @@ class Trainer:
     def plot_training_history(self, save: bool = True):
         """Plot training history."""
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-        
+
         epochs = range(1, len(self.history['train_loss']) + 1)
-        
+
         # Plot total loss
-        axes[0, 0].plot(epochs, self.history['train_loss'], label='Train', linewidth=2)
-        axes[0, 0].plot(epochs, self.history['val_loss'], label='Val', linewidth=2)
+        axes[0, 0].plot(epochs, self.history['train_loss'], label='Train (total)', linewidth=2)
+        axes[0, 0].plot(epochs, self.history['val_loss'], label='Val (task only)', linewidth=2)
         axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Total Loss')
+        axes[0, 0].set_ylabel('Loss')
         axes[0, 0].set_title('Total Loss')
         axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
-        
-        # Plot task loss
-        axes[0, 1].plot(epochs, self.history['train_task_loss'], linewidth=2)
+
+        # Plot task loss (fair comparison: both are task loss only)
+        axes[0, 1].plot(epochs, self.history['train_task_loss'], label='Train', linewidth=2)
+        axes[0, 1].plot(epochs, self.history['val_loss'], label='Val', linewidth=2)
         axes[0, 1].set_xlabel('Epoch')
         axes[0, 1].set_ylabel('Task Loss (MSE)')
-        axes[0, 1].set_title('Task Loss')
+        axes[0, 1].set_title('Task Loss (Train vs Val)')
+        axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
-        
+
         # Plot regularization loss
         axes[1, 0].plot(epochs, self.history['train_reg_loss'], linewidth=2, color='orange')
         axes[1, 0].set_xlabel('Epoch')
         axes[1, 0].set_ylabel('Regularization Loss')
         axes[1, 0].set_title('L2 Regularization Loss')
         axes[1, 0].grid(True, alpha=0.3)
-        
-        # Plot accuracy
-        axes[1, 1].plot(epochs, self.history['val_accuracy'], linewidth=2, color='green')
+
+        # Plot accuracy (both train and val)
+        axes[1, 1].plot(epochs, self.history['train_accuracy'], label='Train', linewidth=2, color='blue')
+        axes[1, 1].plot(epochs, self.history['val_accuracy'], label='Val', linewidth=2, color='green')
         axes[1, 1].set_xlabel('Epoch')
         axes[1, 1].set_ylabel('Accuracy')
-        axes[1, 1].set_title('Validation Accuracy')
+        axes[1, 1].set_title('Accuracy (Train vs Val)')
         axes[1, 1].set_ylim(0, 1.05)
+        axes[1, 1].legend()
         axes[1, 1].grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
+
         if save:
             plt.savefig(self.save_dir / 'training_history.png', dpi=150, bbox_inches='tight')
-        
+
         plt.show()
 
 
@@ -410,18 +463,25 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
     
+    # Dataset parameters
+    train_trials = 2000
+    val_trials = 500
+    test_trials = 500
+    batch_size = 32
+    n_checkerboard_channels = 10
+    dataset_kwargs = {'n_checkerboard_channels': n_checkerboard_channels}
+
     # Create dataloaders
     print("\nCreating datasets...")
     train_loader, val_loader, test_loader = create_dataloaders(
-        train_trials=2000,
-        val_trials=500,
-        test_trials=500,
-        batch_size=32,
-        n_checkerboard_channels=10  # Number of binary checker inputs
+        train_trials=train_trials,
+        val_trials=val_trials,
+        test_trials=test_trials,
+        batch_size=batch_size,
+        **dataset_kwargs
     )
-    
+
     # Determine input size (3 cues + n_checkerboard_channels)
-    n_checkerboard_channels = 10
     input_size = 3 + n_checkerboard_channels
     
     # Create model
@@ -459,7 +519,10 @@ def main():
         val_loader=val_loader,
         optimizer=optimizer,
         device=device,
-        save_dir='./checkpoints'
+        save_dir='./checkpoints',
+        train_trials=train_trials,
+        batch_size=batch_size,
+        dataset_kwargs=dataset_kwargs
     )
     
     # Train model
