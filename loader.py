@@ -1,3 +1,4 @@
+import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -532,20 +533,23 @@ if __name__ == "__main__":
     info = dataset.get_trial_info(0)
     print(f"Trial info: {info}")
     
+    # Create plots folder if it doesn't exist
+    os.makedirs('plots', exist_ok=True)
+
     # Plot multiple trials as heatmaps
     fig1 = plot_trials(dataset, trial_indices=[0, 5, 10, 15])
-    plt.savefig('trials_heatmap.png', dpi=150, bbox_inches='tight')
-    print("Saved trials_heatmap.png")
-    
+    plt.savefig('plots/trials_heatmap.png', dpi=150, bbox_inches='tight')
+    print("Saved plots/trials_heatmap.png")
+
     # Plot single trial with detailed view
     fig2 = plot_trial_detailed(dataset, trial_idx=0)
-    plt.savefig('trial_detailed.png', dpi=150, bbox_inches='tight')
-    print("Saved trial_detailed.png")
-    
+    plt.savefig('plots/trial_detailed.png', dpi=150, bbox_inches='tight')
+    print("Saved plots/trial_detailed.png")
+
     # Plot psychometric curve
     fig3 = plot_psychometric_curve(dataset)
-    plt.savefig('psychometric_curve.png', dpi=150, bbox_inches='tight')
-    print("Saved psychometric_curve.png")
+    plt.savefig('plots/psychometric_curve.png', dpi=150, bbox_inches='tight')
+    print("Saved plots/psychometric_curve.png")
     
     plt.show()
     

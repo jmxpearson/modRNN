@@ -1,3 +1,4 @@
+import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -161,36 +162,30 @@ class DelayedMatchToEvidenceDataset(Dataset):
         # Delay period: hold information with no cues
         delay_cue[sample_end_idx:delay_end_idx] = 1.0
         
-        # Test period: test stimuli revealed
-        # test_cue[delay_end_idx:test_end_idx] = 1.0
-        test_cue[delay_end_idx:] = 1.0
-        
-        # Target output: -1 (choose black) or +1 (choose white) during test and arm
-        # The correct choice matches the predominant color
-        if predom_color == 0:  # Black predominant
-            target_output[delay_end_idx:] = -1.0
-        else:  # White predominant
-            target_output[delay_end_idx:] = 1.0
-        
-        # Randomize test stimulus sides (which side has black vs white)
-        test_side = np.random.randint(0, 2)  # 0=left, 1=right
-        
         # Calculate empirical coherence from the fixed checkers
         n_predom = np.sum(fixed_checkers == predom_color)
         empirical_coherence = n_predom / len(fixed_checkers)
         
-        # choose correct answer based on actual predominant checker color
+        # Test period: test stimuli revealed
+        # test_cue[delay_end_idx:test_end_idx] = 1.0
+        test_cue[delay_end_idx:] = 1.0
+
+        # Randomize test stimulus sides (which side has black vs white)
+        test_side = np.random.randint(0, 2)  # 0=left, 1=right
+
+        # Determine empirical predominant color from actual checker counts
         if n_predom >= self.n_checkerboard_channels - n_predom:
             empirical_predom_color = predom_color
         else:
             empirical_predom_color = 1 - predom_color
 
-
-        # Determine correct choice side based on predom color and test arrangement
-        if (empirical_predom_color == 0 and test_side == 0) or (empirical_predom_color == 1 and test_side == 1):
-            correct_side = 0  # Left
-        else:
-            correct_side = 1  # Right
+        # Target output: correct side based on XOR of empirical_predom_color and test_side
+        # If predom=black(0) & side=0 -> correct=0 (left, -1)
+        # If predom=black(0) & side=1 -> correct=1 (right, +1)
+        # If predom=white(1) & side=0 -> correct=1 (right, +1)
+        # If predom=white(1) & side=1 -> correct=0 (left, -1)
+        correct_side = empirical_predom_color ^ test_side
+        target_output[delay_end_idx:] = -1.0 if correct_side == 0 else 1.0
         
         return {
             'sample_cue': sample_cue,
@@ -208,7 +203,8 @@ class DelayedMatchToEvidenceDataset(Dataset):
             'correct_side': correct_side,
             'fixed_checkers': fixed_checkers,
             'empirical_coherence': empirical_coherence,
-            'n_predom_checkers': int(n_predom)
+            'n_predom_checkers': int(n_predom),
+            'empirical_predom_color': empirical_predom_color
         }
     
     def _generate_trials(self):
@@ -262,7 +258,8 @@ class DelayedMatchToEvidenceDataset(Dataset):
             'correct_side': 'right' if trial['correct_side'] == 1 else 'left',
             'difficulty': 1.0 - trial['coherence'],
             'n_predom_checkers': trial['n_predom_checkers'],
-            'empirical_coherence': trial['empirical_coherence']
+            'empirical_coherence': trial['empirical_coherence'],
+            'empirical_predom_color': 'white' if trial['empirical_predom_color'] == 1 else 'black'
         }
 
 
@@ -394,16 +391,25 @@ def plot_trials(
     # Generate feature names dynamically based on number of checkerboard channels
     feature_names = ['Sample Cue', 'Delay Cue', 'Test Cue']
     feature_names += [f'Checker {i}' for i in range(dataset.n_checkerboard_channels)]
-    feature_names += ['Target Output']
-    
+    feature_names += ['Side Cue', 'Target Output']
+
     for ax_idx, trial_idx in enumerate(trial_indices):
         inputs, target = dataset[trial_idx]
         info = dataset.get_trial_info(trial_idx)
-        
+        trial = dataset.trials[trial_idx]
+
         # Combine inputs and target for plotting
         inputs_np = inputs.numpy().T
         target_np = target.numpy()[np.newaxis, :]
-        data = np.vstack([inputs_np, target_np])
+
+        # Create side cue row (constant value throughout trial, shown during test period)
+        n_timesteps = inputs.shape[0]
+        side_cue_np = np.zeros((1, n_timesteps))
+        delay_end_idx = int((info['sample_duration'] + info['delay_duration']) / dataset.time_bin_size)
+        # Side cue: -1 for left (0), +1 for right (1)
+        side_cue_np[0, delay_end_idx:] = -1.0 if trial['test_side'] == 0 else 1.0
+
+        data = np.vstack([inputs_np, side_cue_np, target_np])
         
         # Create heatmap with blue/orange colormap
         im = axes[ax_idx].imshow(
@@ -430,8 +436,9 @@ def plot_trials(
         
         # Add title with trial information
         title = (f"Trial {trial_idx}: Predom={info['predom_color'].capitalize()} | "
-                f"Coherence={info['coherence']:.2f} (Empirical={info['empirical_coherence']:.2f}) | "
-                f"{info['n_predom_checkers']}/{dataset.n_checkerboard_channels} checkers")
+                f"EmpPredom={info['empirical_predom_color'].capitalize()} | "
+                f"SideCue={info['test_side'].capitalize()} | "
+                f"Correct={info['correct_side'].capitalize()}")
         axes[ax_idx].set_title(title, fontsize=10, pad=10)
         
         # Add x-axis label only for bottom plot
@@ -473,20 +480,26 @@ def plot_trial_detailed(
     
     inputs, target = dataset[trial_idx]
     info = dataset.get_trial_info(trial_idx)
+    trial = dataset.trials[trial_idx]
     inputs_np = inputs.numpy()
     target_np = target.numpy()
-    
+
     # Create time axis in seconds
     time_axis = np.arange(len(inputs_np)) * dataset.time_bin_size
-    
+
     # Calculate epoch boundaries
     sample_end = info['sample_duration']
     delay_end = info['sample_duration'] + info['delay_duration']
     test_end = delay_end + (dataset.test_length / dataset.avg_speed)
-    
-    fig, axes = plt.subplots(6, 1, figsize=figsize, sharex=True)
-    
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#e377c2', '#d62728']
+
+    # Create side cue time series (shown during test period)
+    side_cue_np = np.zeros(len(inputs_np))
+    delay_end_idx = int(delay_end / dataset.time_bin_size)
+    side_cue_np[delay_end_idx:] = -1.0 if trial['test_side'] == 0 else 1.0
+
+    fig, axes = plt.subplots(7, 1, figsize=figsize, sharex=True)
+
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#e377c2', '#8c564b', '#d62728']
     
     # Plot first 3 cue features
     cue_names = ['Sample Cue', 'Delay Cue', 'Test Cue']
@@ -521,68 +534,94 @@ def plot_trial_detailed(
         if i == 0:
             axes[i].legend(loc='upper right', fontsize=9)
     
-    # Plot a few checkerboard channels (up to 3)
-    n_channels_to_plot = min(3, dataset.n_checkerboard_channels)
+    # Plot a few checkerboard channels (up to 2)
+    n_channels_to_plot = min(2, dataset.n_checkerboard_channels)
     for i in range(n_channels_to_plot):
+        ax_idx = 3 + i
         channel_idx = 3 + i  # After the 3 cue inputs
-        axes[channel_idx].plot(time_axis, inputs_np[:, channel_idx], 
-                          color=colors[3 + i % 3], linewidth=2)
-        axes[channel_idx].fill_between(
-            time_axis, 
-            0, 
-            inputs_np[:, channel_idx], 
-            color=colors[3 + i % 3], 
+        axes[ax_idx].plot(time_axis, inputs_np[:, channel_idx],
+                          color=colors[ax_idx], linewidth=2)
+        axes[ax_idx].fill_between(
+            time_axis,
+            0,
+            inputs_np[:, channel_idx],
+            color=colors[ax_idx],
             alpha=0.3
         )
-        axes[channel_idx].set_ylabel(f'Checker {i}', fontsize=11, fontweight='bold')
-        axes[channel_idx].set_ylim(-0.1, 1.1)
-        axes[channel_idx].grid(True, alpha=0.3)
-        
+        axes[ax_idx].set_ylabel(f'Checker {i}', fontsize=11, fontweight='bold')
+        axes[ax_idx].set_ylim(-0.1, 1.1)
+        axes[ax_idx].grid(True, alpha=0.3)
+
         # Add vertical lines for epoch boundaries
-        axes[channel_idx].axvline(x=sample_end, color='black', linestyle='--', 
+        axes[ax_idx].axvline(x=sample_end, color='black', linestyle='--',
                              linewidth=1.5, alpha=0.5)
-        axes[channel_idx].axvline(x=delay_end, color='purple', linestyle='--', 
+        axes[ax_idx].axvline(x=delay_end, color='purple', linestyle='--',
                              linewidth=1.5, alpha=0.5)
-        
+
         # Shade epochs
-        axes[channel_idx].axvspan(0, sample_end, alpha=0.1, color='lightblue')
-        axes[channel_idx].axvspan(sample_end, delay_end, alpha=0.1, color='lightyellow')
-        axes[channel_idx].axvspan(delay_end, test_end, alpha=0.1, color='lightgreen')
-    
-    # Plot target output
-    axes[5].plot(time_axis, target_np, color=colors[5], linewidth=2)
+        axes[ax_idx].axvspan(0, sample_end, alpha=0.1, color='lightblue')
+        axes[ax_idx].axvspan(sample_end, delay_end, alpha=0.1, color='lightyellow')
+        axes[ax_idx].axvspan(delay_end, test_end, alpha=0.1, color='lightgreen')
+
+    # Plot side cue
+    axes[5].plot(time_axis, side_cue_np, color=colors[5], linewidth=2)
     axes[5].fill_between(
-        time_axis, 
-        0, 
-        target_np, 
-        color=colors[5], 
+        time_axis,
+        0,
+        side_cue_np,
+        color=colors[5],
         alpha=0.3
     )
-    axes[5].set_ylabel('Target Output', fontsize=11, fontweight='bold')
+    axes[5].set_ylabel('Side Cue', fontsize=11, fontweight='bold')
     axes[5].set_ylim(-1.2, 1.2)
     axes[5].axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
     axes[5].grid(True, alpha=0.3)
-    
+
     # Add vertical lines for epoch boundaries
-    axes[5].axvline(x=sample_end, color='black', linestyle='--', 
+    axes[5].axvline(x=sample_end, color='black', linestyle='--',
                    linewidth=1.5, alpha=0.5)
-    axes[5].axvline(x=delay_end, color='purple', linestyle='--', 
+    axes[5].axvline(x=delay_end, color='purple', linestyle='--',
                    linewidth=1.5, alpha=0.5)
-    
+
     # Shade epochs
     axes[5].axvspan(0, sample_end, alpha=0.1, color='lightblue')
     axes[5].axvspan(sample_end, delay_end, alpha=0.1, color='lightyellow')
     axes[5].axvspan(delay_end, test_end, alpha=0.1, color='lightgreen')
-    
+
+    # Plot target output
+    axes[6].plot(time_axis, target_np, color=colors[6], linewidth=2)
+    axes[6].fill_between(
+        time_axis,
+        0,
+        target_np,
+        color=colors[6],
+        alpha=0.3
+    )
+    axes[6].set_ylabel('Target Output', fontsize=11, fontweight='bold')
+    axes[6].set_ylim(-1.2, 1.2)
+    axes[6].axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
+    axes[6].grid(True, alpha=0.3)
+
+    # Add vertical lines for epoch boundaries
+    axes[6].axvline(x=sample_end, color='black', linestyle='--',
+                   linewidth=1.5, alpha=0.5)
+    axes[6].axvline(x=delay_end, color='purple', linestyle='--',
+                   linewidth=1.5, alpha=0.5)
+
+    # Shade epochs
+    axes[6].axvspan(0, sample_end, alpha=0.1, color='lightblue')
+    axes[6].axvspan(sample_end, delay_end, alpha=0.1, color='lightyellow')
+    axes[6].axvspan(delay_end, test_end, alpha=0.1, color='lightgreen')
+
     axes[-1].set_xlabel('Time (seconds)', fontsize=12)
-    
+
     fig.suptitle(
-        f"Trial {trial_idx}: Predominant Color = {info['predom_color'].capitalize()} | "
-        f"Coherence = {info['coherence']:.2f} (Empirical = {info['empirical_coherence']:.2f}) | "
-        f"Difficulty = {info['difficulty']:.2f}\n"
-        f"Sample Duration = {info['sample_duration']:.2f}s, "
-        f"Delay Duration = {info['delay_duration']:.2f}s | "
-        f"{info['n_predom_checkers']}/{dataset.n_checkerboard_channels} checkers match predominant color",
+        f"Trial {trial_idx}: Predom={info['predom_color'].capitalize()} | "
+        f"EmpPredom={info['empirical_predom_color'].capitalize()} | "
+        f"SideCue={info['test_side'].capitalize()} | "
+        f"Correct={info['correct_side'].capitalize()}\n"
+        f"Sample={info['sample_duration']:.2f}s, Delay={info['delay_duration']:.2f}s | "
+        f"{info['n_predom_checkers']}/{dataset.n_checkerboard_channels} checkers",
         fontsize=11,
         fontweight='bold',
         y=0.995
@@ -704,20 +743,23 @@ if __name__ == "__main__":
         print(f"Empirical coherence: {info['empirical_coherence']:.2f} (target: {info['coherence']:.2f})")
         print(f"Number of predominant-color checkers: {info['n_predom_checkers']}/{dataset.n_checkerboard_channels}")
     
+    # Create plots folder if it doesn't exist
+    os.makedirs('plots', exist_ok=True)
+
     # Plot multiple trials as heatmaps
     fig1 = plot_trials(dataset, trial_indices=[0, 5, 10, 15])
-    plt.savefig('delayed_match_trials_heatmap.png', dpi=150, bbox_inches='tight')
-    print("\nSaved delayed_match_trials_heatmap.png")
-    
+    plt.savefig('plots/delayed_match_trials_heatmap.png', dpi=150, bbox_inches='tight')
+    print("\nSaved plots/delayed_match_trials_heatmap.png")
+
     # Plot single trial with detailed view
     fig2 = plot_trial_detailed(dataset, trial_idx=0)
-    plt.savefig('delayed_match_trial_detailed.png', dpi=150, bbox_inches='tight')
-    print("Saved delayed_match_trial_detailed.png")
-    
+    plt.savefig('plots/delayed_match_trial_detailed.png', dpi=150, bbox_inches='tight')
+    print("Saved plots/delayed_match_trial_detailed.png")
+
     # Plot psychometric curves
     fig3 = plot_psychometric_curve(dataset)
-    plt.savefig('delayed_match_psychometric.png', dpi=150, bbox_inches='tight')
-    print("Saved delayed_match_psychometric.png")
+    plt.savefig('plots/delayed_match_psychometric.png', dpi=150, bbox_inches='tight')
+    print("Saved plots/delayed_match_psychometric.png")
     
     plt.show()
     
