@@ -91,37 +91,37 @@ class DelayedMatchToEvidenceDataset(Dataset):
         coherence = np.clip(coherence, self.coherence_min, self.coherence_max)
         return coherence
     
-    def _generate_fixed_checkers(self, coherence: float, predom_color: int, 
+    def _generate_fixed_checkers(self, coherence: float, predom_color: int,
                                   n_channels: int) -> np.ndarray:
         """
         Generate fixed binary checkers for the entire sample period.
-        
+
         Each checker is drawn once from a binomial distribution and remains
         fixed throughout the sample period.
-        
+
         Args:
             coherence: Probability that each checker is the predominant color
-            predom_color: 0=black, 1=white
+            predom_color: -1=black, +1=white
             n_channels: Number of checker channels
-            
+
         Returns:
-            checkers: Binary array (n_channels,) with 0=black, 1=white
+            checkers: Binary array (n_channels,) with -1=black, +1=white
         """
-        checkers = np.zeros(n_channels, dtype=int)
+        checkers = np.full(n_channels, -1, dtype=int)
         for i in range(n_channels):
-            # Each checker is drawn from binomial: 1 with probability=coherence
+            # Each checker is drawn from binomial: predom_color with probability=coherence
             if np.random.rand() < coherence:
                 checkers[i] = predom_color
             else:
-                checkers[i] = 1 - predom_color
-        
+                checkers[i] = -predom_color  # opposite color
+
         return checkers
     
     def _generate_single_trial(self) -> Dict[str, Any]:
         """Generate a single trial with checkerboard evidence and task structure."""
         # Sample coherence and predominant color
         coherence = self._sample_coherence()
-        predom_color = np.random.choice([0, 1])  # 0=black, 1=white
+        predom_color = np.random.choice([-1, 1])  # -1=black, +1=white
         
         # Generate fixed checkers for this trial (drawn once from binomial distribution)
         fixed_checkers = self._generate_fixed_checkers(
@@ -142,12 +142,12 @@ class DelayedMatchToEvidenceDataset(Dataset):
         n_timesteps = int(total_duration / self.time_bin_size)
         
         # Initialize input arrays (time x features)
-        sample_cue = np.zeros(n_timesteps)  # Indicates sample period
-        delay_cue = np.zeros(n_timesteps)  # Indicates delay period
-        test_cue = np.zeros(n_timesteps)  # Indicates test period
-        # Binary checkerboard inputs - fixed for entire sample period
+        sample_cue = np.zeros(n_timesteps)  # Indicates sample period (0=off, 1=on)
+        delay_cue = np.zeros(n_timesteps)  # Indicates delay period (0=off, 1=on)
+        test_cue = np.zeros(n_timesteps)  # Indicates test period (0=off, 1=on)
+        # Binary checkerboard inputs - shown during sample period only (-1=black, +1=white, 0=off)
         checkerboard_samples = np.zeros((n_timesteps, self.n_checkerboard_channels), dtype=int)
-        target_output = np.zeros(n_timesteps)  # Target choice
+        target_output = np.zeros(n_timesteps)  # Target choice (will be set to -1 or +1)
         
         # Calculate time indices for each epoch
         sample_end_idx = int(sample_duration / self.time_bin_size)
@@ -171,21 +171,21 @@ class DelayedMatchToEvidenceDataset(Dataset):
         test_cue[delay_end_idx:] = 1.0
 
         # Randomize test stimulus sides (which side has black vs white)
-        test_side = np.random.randint(0, 2)  # 0=left, 1=right
+        test_side = np.random.choice([-1, 1])  # -1=left, +1=right
 
         # Determine empirical predominant color from actual checker counts
         if n_predom >= self.n_checkerboard_channels - n_predom:
             empirical_predom_color = predom_color
         else:
-            empirical_predom_color = 1 - predom_color
+            empirical_predom_color = -predom_color  # opposite color
 
-        # Target output: correct side based on XOR of empirical_predom_color and test_side
-        # If predom=black(0) & side=0 -> correct=0 (left, -1)
-        # If predom=black(0) & side=1 -> correct=1 (right, +1)
-        # If predom=white(1) & side=0 -> correct=1 (right, +1)
-        # If predom=white(1) & side=1 -> correct=0 (left, -1)
-        correct_side = empirical_predom_color ^ test_side
-        target_output[delay_end_idx:] = -1.0 if correct_side == 0 else 1.0
+        # Target output: correct side via multiplication (equivalent to XOR with -1/+1)
+        # If predom=black(-1) & side=left(-1) -> correct=-1 (left)
+        # If predom=black(-1) & side=right(+1) -> correct=+1 (right)
+        # If predom=white(+1) & side=left(-1) -> correct=+1 (right)
+        # If predom=white(+1) & side=right(+1) -> correct=-1 (left)
+        correct_side = -empirical_predom_color * test_side
+        target_output[delay_end_idx:] = float(correct_side)
         
         return {
             'sample_cue': sample_cue,
@@ -406,8 +406,8 @@ def plot_trials(
         n_timesteps = inputs.shape[0]
         side_cue_np = np.zeros((1, n_timesteps))
         delay_end_idx = int((info['sample_duration'] + info['delay_duration']) / dataset.time_bin_size)
-        # Side cue: -1 for left (0), +1 for right (1)
-        side_cue_np[0, delay_end_idx:] = -1.0 if trial['test_side'] == 0 else 1.0
+        # Side cue: -1 for left, +1 for right
+        side_cue_np[0, delay_end_idx:] = float(trial['test_side'])
 
         data = np.vstack([inputs_np, side_cue_np, target_np])
         
@@ -495,7 +495,7 @@ def plot_trial_detailed(
     # Create side cue time series (shown during test period)
     side_cue_np = np.zeros(len(inputs_np))
     delay_end_idx = int(delay_end / dataset.time_bin_size)
-    side_cue_np[delay_end_idx:] = -1.0 if trial['test_side'] == 0 else 1.0
+    side_cue_np[delay_end_idx:] = float(trial['test_side'])
 
     fig, axes = plt.subplots(7, 1, figsize=figsize, sharex=True)
 
@@ -549,7 +549,8 @@ def plot_trial_detailed(
             alpha=0.3
         )
         axes[ax_idx].set_ylabel(f'Checker {i}', fontsize=11, fontweight='bold')
-        axes[ax_idx].set_ylim(-0.1, 1.1)
+        axes[ax_idx].set_ylim(-1.2, 1.2)
+        axes[ax_idx].axhline(y=0, color='black', linestyle='-', linewidth=0.5, alpha=0.3)
         axes[ax_idx].grid(True, alpha=0.3)
 
         # Add vertical lines for epoch boundaries
