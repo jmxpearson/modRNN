@@ -29,8 +29,13 @@ class Trainer:
         device: str = 'cpu',
         save_dir: str = './checkpoints',
         train_trials: int = 2000,
+        val_trials: int = 500,
         batch_size: int = 32,
-        dataset_kwargs: Optional[Dict] = None
+        dataset_kwargs: Optional[Dict] = None,
+        curriculum_enabled: bool = False,
+        curriculum_min_epochs: int = 10,
+        curriculum_plateau_patience: int = 10,
+        curriculum_plateau_min_delta: float = 1e-4
     ):
         """
         Args:
@@ -41,8 +46,13 @@ class Trainer:
             device: 'cpu' or 'cuda'
             save_dir: Directory to save checkpoints
             train_trials: Number of training trials per epoch
+            val_trials: Number of validation trials
             batch_size: Batch size for training
             dataset_kwargs: Additional kwargs for dataset creation
+            curriculum_enabled: Whether to use curriculum learning
+            curriculum_min_epochs: Minimum epochs before transition allowed
+            curriculum_plateau_patience: Epochs without val_loss improvement before transition
+            curriculum_plateau_min_delta: Minimum val_loss decrease to count as improvement
         """
         self.model = model
         self.train_loader = train_loader
@@ -51,11 +61,22 @@ class Trainer:
         self.device = device
         self.save_dir = Path(save_dir)
 
-        # Store parameters for regenerating training data each epoch
+        # Store parameters for regenerating data
         self.train_trials = train_trials
+        self.val_trials = val_trials
         self.batch_size = batch_size
         self.dataset_kwargs = dataset_kwargs if dataset_kwargs is not None else {}
         self.save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Curriculum learning state
+        self.curriculum_enabled = curriculum_enabled
+        self.curriculum_min_epochs = curriculum_min_epochs
+        self.curriculum_plateau_patience = curriculum_plateau_patience
+        self.curriculum_plateau_min_delta = curriculum_plateau_min_delta
+        self.curriculum_stage = 0  # 0 = fixed side, 1 = random sides
+        self.curriculum_best_val_loss = float('inf')
+        self.curriculum_epochs_without_improvement = 0
+        self.curriculum_transition_epoch = None
         
         # Loss function: MSE between model output and target
         self.criterion = nn.MSELoss(reduction='none')  # No reduction for masking
@@ -68,22 +89,49 @@ class Trainer:
             'train_accuracy': [],
             'val_loss': [],
             'val_accuracy': [],
-            'learning_rate': []
+            'learning_rate': [],
+            'curriculum_stage': []
         }
         
         self.best_val_loss = float('inf')
 
     def _regenerate_train_loader(self, seed: int):
-        """Regenerate training dataset with a new seed."""
+        """Regenerate training dataset with a new seed, respecting curriculum stage."""
+        kwargs = self.dataset_kwargs.copy()
+        if self.curriculum_enabled:
+            # Stage 0: fixed test_side=1, zero out test_side input
+            # Stage 1: random test_side, provide test_side input
+            kwargs['fixed_test_side'] = 1 if self.curriculum_stage == 0 else None
+            kwargs['zero_test_side_input'] = (self.curriculum_stage == 0)
         train_dataset = DelayedMatchToEvidenceDataset(
             n_trials=self.train_trials,
             seed=seed,
-            **self.dataset_kwargs
+            **kwargs
         )
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
+            collate_fn=collate_variable_length_trials
+        )
+
+    def _regenerate_val_loader(self):
+        """Regenerate validation dataset to match curriculum stage."""
+        kwargs = self.dataset_kwargs.copy()
+        if self.curriculum_enabled:
+            # Stage 0: fixed test_side=1, zero out test_side input
+            # Stage 1: random test_side, provide test_side input
+            kwargs['fixed_test_side'] = 1 if self.curriculum_stage == 0 else None
+            kwargs['zero_test_side_input'] = (self.curriculum_stage == 0)
+        val_dataset = DelayedMatchToEvidenceDataset(
+            n_trials=self.val_trials,
+            seed=99999,  # Fixed seed for consistent validation set within stage
+            **kwargs
+        )
+        self.val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
             collate_fn=collate_variable_length_trials
         )
 
@@ -237,7 +285,35 @@ class Trainer:
         
         accuracy = correct / total if total > 0 else 0.0
         return float(np.mean(losses)), float(accuracy)
-    
+
+    def _check_curriculum_transition(self, epoch: int, val_loss: float):
+        """Check if curriculum should transition to next stage based on val_loss plateau."""
+        if not self.curriculum_enabled or self.curriculum_stage >= 1:
+            return
+
+        # Check if val_loss improved
+        if val_loss < self.curriculum_best_val_loss - self.curriculum_plateau_min_delta:
+            self.curriculum_best_val_loss = val_loss
+            self.curriculum_epochs_without_improvement = 0
+        else:
+            self.curriculum_epochs_without_improvement += 1
+
+        # Transition if: min epochs passed and loss has plateaued
+        if (epoch >= self.curriculum_min_epochs and
+                self.curriculum_epochs_without_improvement >= self.curriculum_plateau_patience):
+            self.curriculum_stage = 1
+            self.curriculum_transition_epoch = epoch
+            # Reset plateau tracking for potential future stages
+            self.curriculum_best_val_loss = float('inf')
+            self.curriculum_epochs_without_improvement = 0
+            # Regenerate validation set to match new stage
+            self._regenerate_val_loader()
+            print(f"\n{'='*60}")
+            print(f"CURRICULUM TRANSITION at epoch {epoch}")
+            print(f"Stage 0 (fixed side) -> Stage 1 (random sides)")
+            print(f"Val loss plateaued at: {val_loss:.6f}")
+            print(f"{'='*60}\n")
+
     def train(
         self,
         n_epochs: int,
@@ -257,7 +333,12 @@ class Trainer:
         print(f"Starting training for {n_epochs} epochs...")
         print(f"Device: {self.device}")
         print(f"Number of parameters: {sum(p.numel() for p in self.model.parameters())}")
-        
+        if self.curriculum_enabled:
+            print(f"Curriculum learning enabled: min_epochs={self.curriculum_min_epochs}, "
+                  f"plateau_patience={self.curriculum_plateau_patience}")
+            # Ensure validation set matches initial curriculum stage
+            self._regenerate_val_loader()
+
         for epoch in range(1, n_epochs + 1):
             print(f"\nEpoch {epoch}/{n_epochs}")
 
@@ -280,7 +361,11 @@ class Trainer:
             val_loss, val_accuracy = self.validate()
             self.history['val_loss'].append(val_loss)
             self.history['val_accuracy'].append(val_accuracy)
-            
+
+            # Curriculum learning transition check (based on val_loss plateau)
+            self._check_curriculum_transition(epoch, val_loss)
+            self.history['curriculum_stage'].append(self.curriculum_stage)
+
             # Track learning rate
             current_lr = self.optimizer.param_groups[0]['lr']
             self.history['learning_rate'].append(current_lr)
@@ -328,7 +413,11 @@ class Trainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'history': self.history,
-            'best_val_loss': self.best_val_loss
+            'best_val_loss': self.best_val_loss,
+            'curriculum_stage': self.curriculum_stage,
+            'curriculum_best_val_loss': self.curriculum_best_val_loss,
+            'curriculum_epochs_without_improvement': self.curriculum_epochs_without_improvement,
+            'curriculum_transition_epoch': self.curriculum_transition_epoch
         }
         torch.save(checkpoint, self.save_dir / filename)
     
@@ -339,6 +428,11 @@ class Trainer:
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.history = checkpoint['history']
         self.best_val_loss = checkpoint['best_val_loss']
+        # Restore curriculum state (backward-compatible defaults)
+        self.curriculum_stage = checkpoint.get('curriculum_stage', 0)
+        self.curriculum_best_val_loss = checkpoint.get('curriculum_best_val_loss', float('inf'))
+        self.curriculum_epochs_without_improvement = checkpoint.get('curriculum_epochs_without_improvement', 0)
+        self.curriculum_transition_epoch = checkpoint.get('curriculum_transition_epoch', None)
         return checkpoint['epoch']
     
     def plot_training_history(self, save: bool = True, show: bool = True):
@@ -641,7 +735,7 @@ def main():
     )
 
     # Determine input size (3 cues + n_checkerboard_channels)
-    input_size = 3 + n_checkerboard_channels
+    input_size = 4 + n_checkerboard_channels  # 4 cues + checkerboard channels
     
     # Create model
     print("Creating model...")
@@ -674,7 +768,7 @@ def main():
     else:
         scheduler = None
 
-    # Create trainer
+    # Create trainer with curriculum learning
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
@@ -683,8 +777,13 @@ def main():
         device=device,
         save_dir='./checkpoints',
         train_trials=train_trials,
+        val_trials=val_trials,
         batch_size=batch_size,
-        dataset_kwargs=dataset_kwargs
+        dataset_kwargs=dataset_kwargs,
+        curriculum_enabled=True,
+        curriculum_min_epochs=10,
+        curriculum_plateau_patience=10,
+        curriculum_plateau_min_delta=1e-4
     )
     
     # Train model

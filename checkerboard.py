@@ -36,7 +36,9 @@ class DelayedMatchToEvidenceDataset(Dataset):
         gain_values: Optional[list] = None,  # [0.67, 1.0, 1.25]
         gain_probs: Optional[list] = None,  # [0.3, 0.4, 0.3]
         n_checkerboard_channels: int = 10,  # Number of fixed checker channels
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        fixed_test_side: Optional[int] = None,  # None = random, 1 or -1 = fixed
+        zero_test_side_input: bool = False  # If True, zero out test_side input signal
     ):
         """
         Args:
@@ -54,6 +56,8 @@ class DelayedMatchToEvidenceDataset(Dataset):
             gain_probs: Probabilities for each gain value
             n_checkerboard_channels: Number of fixed checker channels
             seed: Random seed for reproducibility
+            fixed_test_side: Fixed test side (1 or -1), or None for random
+            zero_test_side_input: If True, zero out the test_side input signal
         """
         self.n_trials = n_trials
         self.sample_length = sample_length
@@ -67,7 +71,9 @@ class DelayedMatchToEvidenceDataset(Dataset):
         self.coherence_max = coherence_max
         self.coherence_rate = coherence_rate
         self.n_checkerboard_channels = n_checkerboard_channels
-        
+        self.fixed_test_side = fixed_test_side
+        self.zero_test_side_input = zero_test_side_input
+
         if gain_values is None:
             gain_values = [0.67, 1.0, 1.25]
         if gain_probs is None:
@@ -153,6 +159,7 @@ class DelayedMatchToEvidenceDataset(Dataset):
         sample_cue = np.zeros(n_timesteps)  # Indicates sample period (0=off, 1=on)
         delay_cue = np.zeros(n_timesteps)  # Indicates delay period (0=off, 1=on)
         test_cue = np.zeros(n_timesteps)  # Indicates test period (0=off, 1=on)
+        test_side_cue = np.zeros(n_timesteps)  # Test side signal (-1 or +1 during test, 0 otherwise)
         # Binary checkerboard inputs - shown during sample period only (-1=black, +1=white, 0=off)
         checkerboard_samples = np.zeros((n_timesteps, self.n_checkerboard_channels), dtype=int)
         target_output = np.zeros(n_timesteps)  # Target choice (will be set to -1 or +1)
@@ -178,9 +185,14 @@ class DelayedMatchToEvidenceDataset(Dataset):
         # test_cue[delay_end_idx:test_end_idx] = 1.0
         test_cue[delay_end_idx:] = 1.0
 
-        # Randomize test stimulus sides (which side has black vs white)
-        # test_side = 1  # TEMP: always right (was: np.random.choice([-1, 1]))
-        test_side = np.random.choice([-1, 1])
+        # Test stimulus sides (which side has black vs white)
+        if self.fixed_test_side is not None:
+            test_side = self.fixed_test_side
+        else:
+            test_side = np.random.choice([-1, 1])
+
+        # Set test_side_cue during test period
+        test_side_cue[delay_end_idx:] = float(test_side)
 
         # Determine empirical predominant color from actual checker counts
         if n_predom >= self.n_checkerboard_channels - n_predom:
@@ -200,6 +212,7 @@ class DelayedMatchToEvidenceDataset(Dataset):
             'sample_cue': sample_cue,
             'delay_cue': delay_cue,
             'test_cue': test_cue,
+            'test_side_cue': test_side_cue,
             'checkerboard_samples': checkerboard_samples,
             'target_output': target_output,
             'coherence': coherence,
@@ -226,24 +239,32 @@ class DelayedMatchToEvidenceDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
-            inputs: Tensor of shape (time, 3 + n_checkerboard_channels) containing:
+            inputs: Tensor of shape (time, 4 + n_checkerboard_channels) containing:
                 - sample_cue (binary, active during sample)
                 - delay_cue (binary, active during delay)
                 - test_cue (binary, active during test)
+                - test_side_cue (-1 or +1 during test, 0 otherwise; zeroed if zero_test_side_input)
                 - checkerboard_0 to checkerboard_N (binary, 0=black, 1=white)
             target: Tensor of shape (time,) containing desired output:
                 - 0 during sample and delay
                 - -1 (black) or +1 (white) during test and choice
         """
         trial = self.trials[idx]
-        
-        # Stack cue features
+
+        # Get test_side_cue (optionally zeroed out for curriculum learning)
+        if self.zero_test_side_input:
+            test_side_cue = np.zeros_like(trial['test_side_cue'])
+        else:
+            test_side_cue = trial['test_side_cue']
+
+        # Stack cue features (now includes test_side_cue)
         cues = np.stack([
             trial['sample_cue'],
             trial['delay_cue'],
-            trial['test_cue']
+            trial['test_cue'],
+            test_side_cue
         ], axis=1)
-        
+
         # Combine cues with checkerboard samples (convert to float for consistency)
         inputs = np.concatenate([cues, trial['checkerboard_samples'].astype(float)], axis=1)
         
@@ -737,7 +758,7 @@ if __name__ == "__main__":
     
     # Get a single trial
     inputs, target = dataset[0]
-    print(f"Input shape: {inputs.shape}")  # (time_steps, 3 + n_checkerboard_channels)
+    print(f"Input shape: {inputs.shape}")  # (time_steps, 4 + n_checkerboard_channels)
     print(f"Target shape: {target.shape}")  # (time_steps,)
     print(f"Number of input features: 3 cues + {dataset.n_checkerboard_channels} checkerboard channels = {inputs.shape[1]}")
     print(f"Target values (first 5, last 5): {target[:5].numpy()}, {target[-5:].numpy()}")
@@ -783,7 +804,7 @@ if __name__ == "__main__":
     
     # Iterate through a batch
     for batch_inputs, batch_targets, batch_lengths in train_loader:
-        print(f"\nBatch input shape: {batch_inputs.shape}")  # (batch, max_time, 3 + n_checkerboard_channels)
+        print(f"\nBatch input shape: {batch_inputs.shape}")  # (batch, max_time, 4 + n_checkerboard_channels)
         print(f"Batch target shape: {batch_targets.shape}")  # (batch, max_time)
         print(f"Batch lengths: {batch_lengths}")  # Actual sequence lengths
         print(f"All checkerboard values are binary: {torch.all((batch_inputs[:,:,3:] == 0) | (batch_inputs[:,:,3:] == 1)).item()}")
