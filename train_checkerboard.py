@@ -823,7 +823,7 @@ def main():
     print(f"Model has {sum(p.numel() for p in model.parameters())} parameters")
 
     # Create optimizer with lower learning rate
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
 
     # Learning rate scheduler (optional)
     use_scheduler = False
@@ -844,7 +844,7 @@ def main():
         val_trials=val_trials,
         batch_size=batch_size,
         dataset_kwargs=dataset_kwargs,
-        curriculum_enabled=True,
+        curriculum_enabled=False,
         curriculum_min_epochs=10,
         curriculum_plateau_patience=10,
         curriculum_plateau_min_delta=1e-4,
