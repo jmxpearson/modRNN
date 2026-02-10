@@ -24,19 +24,23 @@ class RateRNN(nn.Module):
     Output is a linear readout of firing rates at each timestep:
     y(t) = w_out^T * f(v(t)) + b_out
     """
-    
+
     def __init__(
         self,
         input_size: int,
         hidden_size: int,
         dt: float = 20.0,  # ms, discretization time step
         tau: float = 100.0,  # ms, time constant
-        activation: str = 'tanh',
+        activation: str = "tanh",
         noise_std: float = 0.0,
-        dale_ratio: Optional[float] = None,  # fraction of excitatory units (0.8 for Dale's law)
-        input_fraction: Optional[float] = None,  # fraction of neurons receiving task input (e.g., 0.125)
+        dale_ratio: Optional[
+            float
+        ] = None,  # fraction of excitatory units (0.8 for Dale's law)
+        input_fraction: Optional[
+            float
+        ] = None,  # fraction of neurons receiving task input (e.g., 0.125)
         alpha: Optional[float] = None,  # L2 regularization weight
-        device: str = 'cpu'
+        device: str = "cpu",
     ):
         """
         Args:
@@ -52,7 +56,7 @@ class RateRNN(nn.Module):
             device: 'cpu' or 'cuda'
         """
         super().__init__()
-        
+
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.dt = dt
@@ -62,54 +66,55 @@ class RateRNN(nn.Module):
         self.dale_ratio = dale_ratio
         self.input_fraction = input_fraction
         self.device = device
-        
+
         # Discretization: new_v = (1 - dt/tau) * v + (dt/tau) * (W_rec * f(v) + W_in * x + b)
         self.alpha = dt / tau
-        
+
         # Initialize activation function
-        if activation == 'relu':
+        if activation == "relu":
             self.activation = nn.ReLU()
-        elif activation == 'tanh':
+        elif activation == "tanh":
             self.activation = nn.Tanh()
-        elif activation == 'softplus':
+        elif activation == "softplus":
             self.activation = nn.Softplus()
-        elif activation == 'gelu':
+        elif activation == "gelu":
             self.activation = nn.GELU()
         else:
             raise ValueError(f"Unknown activation: {activation}")
-        
+
         # Input weights
         self.w_in = nn.Linear(input_size, hidden_size, bias=False)
-        
+
         # Recurrent weights
         self.w_rec = nn.Linear(hidden_size, hidden_size, bias=True)
-        
+
         # Output weights - linear readout producing scalar at each timestep
         self.w_out = nn.Linear(hidden_size, 1, bias=True)
-        
+
         # Initialize weights
         self._initialize_weights()
-        
+
         # Dale's law mask (if enabled)
         if dale_ratio is not None:
-            self.register_buffer('dale_mask', self._create_dale_mask())
+            self.register_buffer("dale_mask", self._create_dale_mask())
         else:
             self.dale_mask = None
 
         # Input mask (if enabled) - only a fraction of neurons receive task input
         if input_fraction is not None:
-            self.register_buffer('input_mask', self._create_input_mask())
+            self.register_buffer("input_mask", self._create_input_mask())
         else:
             self.input_mask = None
 
-    
     def _initialize_weights(self, spectral_radius: float = 1.8):
         """Initialize weights with spectral radius control for recurrent weights."""
         # Input weights: Gaussian with small variance
         nn.init.normal_(self.w_in.weight, mean=0.0, std=1.0 / np.sqrt(self.input_size))
 
         # Recurrent weights: random Gaussian, then rescale to target spectral radius
-        nn.init.normal_(self.w_rec.weight, mean=0.0, std=1.0 / np.sqrt(self.hidden_size))
+        nn.init.normal_(
+            self.w_rec.weight, mean=0.0, std=1.0 / np.sqrt(self.hidden_size)
+        )
         with torch.no_grad():
             eigvals = torch.linalg.eigvals(self.w_rec.weight)
             current_radius = eigvals.abs().max().item()
@@ -118,9 +123,11 @@ class RateRNN(nn.Module):
         nn.init.constant_(self.w_rec.bias, 0.0)
 
         # Output weights: scaled so initial output std is O(1)
-        nn.init.normal_(self.w_out.weight, mean=0.0, std=1.0 / np.sqrt(self.hidden_size) * 2)
+        nn.init.normal_(
+            self.w_out.weight, mean=0.0, std=1.0 / np.sqrt(self.hidden_size) * 2
+        )
         nn.init.constant_(self.w_out.bias, 0.0)
-    
+
     def _create_dale_mask(self) -> torch.Tensor:
         """
         Create mask to enforce Dale's law (neurons are either excitatory or inhibitory).
@@ -143,24 +150,28 @@ class RateRNN(nn.Module):
             Mask tensor of shape (hidden_size,) with 1 for neurons receiving input
             and 0 for neurons that don't.
         """
-        assert self.input_fraction is not None, "input_fraction must be set to create input mask"
+        assert self.input_fraction is not None, (
+            "input_fraction must be set to create input mask"
+        )
         n_input_neurons = int(self.input_fraction * self.hidden_size)
         mask = torch.zeros(self.hidden_size)
         mask[:n_input_neurons] = 1.0  # First input_fraction of neurons receive input
         return mask
-    
+
     def apply_dale_constraint(self):
         """Apply Dale's law constraint to recurrent weights."""
         if self.dale_mask is not None:
             with torch.no_grad():
                 # Make weights non-negative then apply sign mask
-                self.w_rec.weight.data = torch.abs(self.w_rec.weight.data) * self.dale_mask
-    
+                self.w_rec.weight.data = (
+                    torch.abs(self.w_rec.weight.data) * self.dale_mask
+                )
+
     def forward(
         self,
         inputs: torch.Tensor,
         hidden: Optional[torch.Tensor] = None,
-        return_states: bool = False
+        return_states: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass through the RNN.
@@ -230,26 +241,26 @@ class RateRNN(nn.Module):
             return outputs_tensor, v, states_tensor
 
         return outputs_tensor, v
-    
+
     def compute_regularization_loss(self) -> torch.Tensor:
         """
         Compute L2 regularization loss on recurrent weights.
-        
+
         Returns:
             Regularization loss
         """
         if self.alpha_rec > 0:
-            return self.alpha_rec * torch.sum(self.w_rec.weight ** 2)
+            return self.alpha_rec * torch.sum(self.w_rec.weight**2)
         else:
             return torch.tensor(0.0, device=self.device)
-    
+
     def init_hidden(self, batch_size: int) -> torch.Tensor:
         """
         Initialize hidden state.
-        
+
         Args:
             batch_size: Batch size
-        
+
         Returns:
             Hidden state tensor of shape (batch_size, hidden_size)
         """
@@ -262,11 +273,11 @@ def train_step(
     targets: torch.Tensor,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
-    mask: Optional[torch.Tensor] = None
+    mask: Optional[torch.Tensor] = None,
 ) -> Tuple[float, float]:
     """
     Perform one training step.
-    
+
     Args:
         model: RateRNN model
         inputs: Input tensor (batch, time, input_size)
@@ -274,17 +285,17 @@ def train_step(
         optimizer: Optimizer
         criterion: Loss function
         mask: Optional mask for variable-length sequences (batch, time)
-    
+
     Returns:
         task_loss: Task loss value
         reg_loss: Regularization loss value
     """
     model.train()
     optimizer.zero_grad()
-    
+
     # Forward pass - returns full time series
     outputs, _ = model(inputs)  # (batch, time)
-    
+
     # Compute task loss
     if targets.dim() == 2 and targets.shape[1] == 1:
         # If target is only for final time point
@@ -296,116 +307,115 @@ def train_step(
             task_loss = criterion(outputs * mask, targets * mask)
         else:
             task_loss = criterion(outputs, targets)
-    
+
     # Compute regularization loss
     reg_loss = model.compute_regularization_loss()
-    
+
     # Total loss
     total_loss = task_loss + reg_loss
-    
+
     # Backward pass
     total_loss.backward()
-    
+
     # Apply Dale's law constraint if enabled
     if model.dale_mask is not None:
         model.apply_dale_constraint()
-    
+
     # Update weights
     optimizer.step()
-    
+
     return task_loss.item(), reg_loss.item()
 
 
 def evaluate(
-    model: RateRNN,
-    inputs: torch.Tensor,
-    targets: torch.Tensor,
-    criterion: nn.Module
+    model: RateRNN, inputs: torch.Tensor, targets: torch.Tensor, criterion: nn.Module
 ) -> Tuple[float, float]:
     """
     Evaluate model on a batch.
-    
+
     Args:
         model: RateRNN model
         inputs: Input tensor (batch, time, input_size)
         targets: Target tensor (batch, 1) for final time point
         criterion: Loss function
-    
+
     Returns:
         loss: Loss value
         accuracy: Classification accuracy (based on final output)
     """
     model.eval()
-    
+
     with torch.no_grad():
         # Forward pass - returns full time series
         outputs, _ = model(inputs)  # (batch, time)
-        
+
         # Use final time point for evaluation
         final_output = outputs[:, -1]  # (batch,)
-        
+
         # Compute loss
         loss = criterion(final_output, targets.squeeze(-1))
-        
+
         # Compute accuracy (for binary classification)
         predictions = (torch.sigmoid(final_output) > 0.5).long()
         accuracy = (predictions == targets.squeeze(-1)).float().mean()
-    
+
     return loss.item(), accuracy.item()
 
 
 # Example usage
 if __name__ == "__main__":
     # Set device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-    
+
     # Create model
     model = RateRNN(
         input_size=4,  # Matches accumulation task (left, right, hold, side cues)
         hidden_size=256,
         dt=20.0,
         tau=100.0,
-        activation='gelu',
+        activation="gelu",
         noise_std=0.05,
         dale_ratio=0.8,  # 80% excitatory neurons
         input_fraction=0.125,  # 1/8 of neurons receive task input
         alpha=1e-4,  # L2 regularization
-        device=device
+        device=device,
     ).to(device)
-    
+
     # Print model info
-    print(f"\nModel architecture:")
+    print("\nModel architecture:")
     print(f"Input size: {model.input_size}")
     print(f"Hidden size: {model.hidden_size}")
-    print(f"Output: 1D time series (linear readout)")
+    print("Output: 1D time series (linear readout)")
     print(f"Time constant: {model.tau} ms")
     print(f"Time step: {model.dt} ms")
     print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
-    
+
     # Create dummy data
     batch_size = 32
     seq_len = 50
     dummy_input = torch.randn(batch_size, seq_len, 4).to(device)
     dummy_target = torch.randint(0, 2, (batch_size, 1)).float().to(device)
-    
+
     # Forward pass
     outputs, hidden = model(dummy_input)
     print(f"\nOutput shape: {outputs.shape}")  # (batch, time)
     print(f"Hidden state shape: {hidden.shape}")
-    print(f"Sample output values (first trial, last 5 timesteps): {outputs[0, -5:].detach().cpu().numpy()}")
-    
+    print(
+        f"Sample output values (first trial, last 5 timesteps): {outputs[0, -5:].detach().cpu().numpy()}"
+    )
+
     # Setup training
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.BCEWithLogitsLoss()
-    
+
     # Training step
     task_loss, reg_loss = train_step(
         model, dummy_input, dummy_target, optimizer, criterion
     )
     print(f"\nTask loss: {task_loss:.4f}")
     print(f"Regularization loss: {reg_loss:.4f}")
-    
+
     # Evaluation
     loss, accuracy = evaluate(model, dummy_input, dummy_target, criterion)
     print(f"Eval loss: {loss:.4f}")
