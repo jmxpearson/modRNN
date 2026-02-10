@@ -119,14 +119,22 @@ class DelayedMatchToEvidenceDataset(Dataset):
     
     def _generate_single_trial(self) -> Dict[str, Any]:
         """Generate a single trial with checkerboard evidence and task structure."""
-        # Sample coherence and predominant color
-        coherence = self._sample_coherence()
-        predom_color = np.random.choice([-1, 1])  # -1=black, +1=white
-        
-        # Generate fixed checkers for this trial (drawn once from binomial distribution)
-        fixed_checkers = self._generate_fixed_checkers(
-            coherence, predom_color, self.n_checkerboard_channels
-        )
+        # Sample coherence and predominant color, rejecting 50% empirical coherence
+        # TEMP: exclude 50% coherence trials
+        while True:
+            coherence = self._sample_coherence()
+            predom_color = np.random.choice([-1, 1])  # -1=black, +1=white
+
+            # Generate fixed checkers for this trial (drawn once from binomial distribution)
+            fixed_checkers = self._generate_fixed_checkers(
+                coherence, predom_color, self.n_checkerboard_channels
+            )
+
+            # Check empirical coherence
+            n_predom = np.sum(fixed_checkers == predom_color)
+            empirical_coherence = n_predom / len(fixed_checkers)
+            if empirical_coherence != 0.5:
+                break  # Accept this trial
         
         # Sample gains for variable durations
         sample_gain = np.random.choice(self.gain_values, p=self.gain_probs)
@@ -171,7 +179,8 @@ class DelayedMatchToEvidenceDataset(Dataset):
         test_cue[delay_end_idx:] = 1.0
 
         # Randomize test stimulus sides (which side has black vs white)
-        test_side = np.random.choice([-1, 1])  # -1=left, +1=right
+        # test_side = 1  # TEMP: always right (was: np.random.choice([-1, 1]))
+        test_side = np.random.choice([-1, 1])
 
         # Determine empirical predominant color from actual checker counts
         if n_predom >= self.n_checkerboard_channels - n_predom:
@@ -185,7 +194,7 @@ class DelayedMatchToEvidenceDataset(Dataset):
         # If predom=white(+1) & side=left(-1) -> correct=+1 (right)
         # If predom=white(+1) & side=right(+1) -> correct=-1 (left)
         correct_side = -empirical_predom_color * test_side
-        target_output[delay_end_idx:] = 50. * float(correct_side)
+        target_output[delay_end_idx:] = float(correct_side)
         
         return {
             'sample_cue': sample_cue,

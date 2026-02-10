@@ -13,7 +13,7 @@ class RateRNN(nn.Module):
 
     where:
     - v is the membrane voltage of recurrent units
-    - f is the activation function (ReLU, tanh, or softplus)
+    - f is the activation function (ReLU, tanh, softplus, or GELU)
     - f(v) gives the firing rates
     - W_rec is the recurrent weight matrix
     - W_in is the input weight matrix
@@ -34,6 +34,7 @@ class RateRNN(nn.Module):
         activation: str = 'tanh',
         noise_std: float = 0.0,
         dale_ratio: Optional[float] = None,  # fraction of excitatory units (0.8 for Dale's law)
+        input_fraction: Optional[float] = None,  # fraction of neurons receiving task input (e.g., 0.125)
         alpha: Optional[float] = None,  # L2 regularization weight
         device: str = 'cpu'
     ):
@@ -43,9 +44,10 @@ class RateRNN(nn.Module):
             hidden_size: Number of recurrent units
             dt: Time step for discretization (ms)
             tau: Time constant (ms)
-            activation: 'relu', 'tanh', or 'softplus'
+            activation: 'relu', 'tanh', 'softplus', or 'gelu'
             noise_std: Standard deviation of noise added to hidden units
             dale_ratio: If set, enforce Dale's law with this fraction of excitatory units
+            input_fraction: If set, only this fraction of neurons receive task input
             alpha: L2 regularization strength for recurrent weights
             device: 'cpu' or 'cuda'
         """
@@ -58,6 +60,7 @@ class RateRNN(nn.Module):
         self.alpha_rec = alpha if alpha is not None else 0.0
         self.noise_std = noise_std
         self.dale_ratio = dale_ratio
+        self.input_fraction = input_fraction
         self.device = device
         
         # Discretization: new_v = (1 - dt/tau) * v + (dt/tau) * (W_rec * f(v) + W_in * x + b)
@@ -70,6 +73,8 @@ class RateRNN(nn.Module):
             self.activation = nn.Tanh()
         elif activation == 'softplus':
             self.activation = nn.Softplus()
+        elif activation == 'gelu':
+            self.activation = nn.GELU()
         else:
             raise ValueError(f"Unknown activation: {activation}")
         
@@ -90,6 +95,12 @@ class RateRNN(nn.Module):
             self.register_buffer('dale_mask', self._create_dale_mask())
         else:
             self.dale_mask = None
+
+        # Input mask (if enabled) - only a fraction of neurons receive task input
+        if input_fraction is not None:
+            self.register_buffer('input_mask', self._create_input_mask())
+        else:
+            self.input_mask = None
 
     
     def _initialize_weights(self, spectral_radius: float = 1.8):
@@ -113,7 +124,7 @@ class RateRNN(nn.Module):
     def _create_dale_mask(self) -> torch.Tensor:
         """
         Create mask to enforce Dale's law (neurons are either excitatory or inhibitory).
-        
+
         Returns:
             Mask tensor of shape (hidden_size, hidden_size) with +1 for excitatory
             connections and -1 for inhibitory connections.
@@ -122,6 +133,20 @@ class RateRNN(nn.Module):
         n_exc = int(self.dale_ratio * self.hidden_size)
         mask = torch.ones(self.hidden_size, self.hidden_size)
         mask[n_exc:, :] = -1  # Last (1-dale_ratio) fraction are inhibitory
+        return mask
+
+    def _create_input_mask(self) -> torch.Tensor:
+        """
+        Create mask so only a fraction of neurons receive task input.
+
+        Returns:
+            Mask tensor of shape (hidden_size,) with 1 for neurons receiving input
+            and 0 for neurons that don't.
+        """
+        assert self.input_fraction is not None, "input_fraction must be set to create input mask"
+        n_input_neurons = int(self.input_fraction * self.hidden_size)
+        mask = torch.zeros(self.hidden_size)
+        mask[:n_input_neurons] = 1.0  # First input_fraction of neurons receive input
         return mask
     
     def apply_dale_constraint(self):
@@ -177,6 +202,9 @@ class RateRNN(nn.Module):
             # τ * dv/dt = -v + W_rec * f(v) + W_in * x + b_rec
             # Discretized: v_new = (1 - α) * v + α * (W_rec * f(v) + W_in * x + b_rec)
             input_current = self.w_in(x_t)
+            # Apply input mask if enabled (only some neurons receive task input)
+            if self.input_mask is not None:
+                input_current = input_current * self.input_mask
             recurrent_current = self.w_rec(rates)
             drive = input_current + recurrent_current
 
@@ -338,9 +366,10 @@ if __name__ == "__main__":
         hidden_size=256,
         dt=20.0,
         tau=100.0,
-        activation='relu',
+        activation='gelu',
         noise_std=0.05,
         dale_ratio=0.8,  # 80% excitatory neurons
+        input_fraction=0.125,  # 1/8 of neurons receive task input
         alpha=1e-4,  # L2 regularization
         device=device
     ).to(device)

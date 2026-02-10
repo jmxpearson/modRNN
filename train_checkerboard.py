@@ -347,29 +347,32 @@ class Trainer:
 
         epochs = range(1, len(self.history['train_loss']) + 1)
 
-        # Plot total loss
+        # Plot total loss (log scale)
         axes[0, 0].plot(epochs, self.history['train_loss'], label='Train (total)', linewidth=2)
         axes[0, 0].plot(epochs, self.history['val_loss'], label='Val (task only)', linewidth=2)
         axes[0, 0].set_xlabel('Epoch')
         axes[0, 0].set_ylabel('Loss')
         axes[0, 0].set_title('Total Loss')
+        axes[0, 0].set_yscale('log')
         axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
 
-        # Plot task loss (fair comparison: both are task loss only)
+        # Plot task loss (log scale, fair comparison: both are task loss only)
         axes[0, 1].plot(epochs, self.history['train_task_loss'], label='Train', linewidth=2)
         axes[0, 1].plot(epochs, self.history['val_loss'], label='Val', linewidth=2)
         axes[0, 1].set_xlabel('Epoch')
         axes[0, 1].set_ylabel('Task Loss (MSE)')
         axes[0, 1].set_title('Task Loss (Train vs Val)')
+        axes[0, 1].set_yscale('log')
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
 
-        # Plot regularization loss
+        # Plot regularization loss (log scale)
         axes[1, 0].plot(epochs, self.history['train_reg_loss'], linewidth=2, color='orange')
         axes[1, 0].set_xlabel('Epoch')
         axes[1, 0].set_ylabel('Regularization Loss')
         axes[1, 0].set_title('L2 Regularization Loss')
+        axes[1, 0].set_yscale('log')
         axes[1, 0].grid(True, alpha=0.3)
 
         # Plot accuracy (both train and val)
@@ -465,8 +468,8 @@ def plot_neural_analysis(
     model: RateRNN,
     val_loader: DataLoader,
     device: str,
-    n_neurons: int = 10,
-    n_readout_trials: int = 10,
+    n_neurons: int = 20,
+    n_readout_trials: int = 20,
     save_path: str = './checkpoints/neural_analysis.png',
     show: bool = True
 ):
@@ -563,10 +566,14 @@ def plot_neural_analysis(
         t_ax = np.arange(all_lengths[ti]) * val_dataset.time_bin_size
         target_sign = np.sign(all_targets[ti][-1])
         color = 'tab:blue' if target_sign < 0 else 'tab:red'
-        ax.plot(t_ax, all_outputs[ti], color=color, lw=1, alpha=0.6)
+        # Line style indicates empirical predominant checker color
+        linestyle = '-' if all_infos[ti]['empirical_predom_color'] == 'black' else '--'
+        ax.plot(t_ax, all_outputs[ti], color=color, ls=linestyle, lw=1, alpha=0.6)
     # Legend proxy
     ax.plot([], [], color='tab:blue', lw=2, label='Target = -1')
     ax.plot([], [], color='tab:red', lw=2, label='Target = +1')
+    ax.plot([], [], color='gray', ls='-', lw=2, label='Black checkers')
+    ax.plot([], [], color='gray', ls='--', lw=2, label='White checkers')
     ax.axhline(0, color='gray', lw=0.5, alpha=0.3)
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Model readout')
@@ -616,10 +623,10 @@ def main():
     print(f"Using device: {device}")
     
     # Dataset parameters
-    train_trials = 32 * 100
     val_trials = 500
     test_trials = 500
     batch_size = 32 
+    train_trials = batch_size * 32
     n_checkerboard_channels = 10
     dataset_kwargs = {'n_checkerboard_channels': n_checkerboard_channels}
 
@@ -682,9 +689,9 @@ def main():
     
     # Train model
     trainer.train(
-        n_epochs=500,
+        n_epochs=1000,
         save_every=10,
-        plot_every=50,
+        plot_every=25,
         scheduler=scheduler
     )
     
