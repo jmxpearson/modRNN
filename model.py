@@ -93,17 +93,22 @@ class RateRNN(nn.Module):
         else:
             self.dale_mask = None
     
-    def _initialize_weights(self):
-        """Initialize weights following the paper's initialization scheme."""
+    def _initialize_weights(self, spectral_radius: float = 1.2):
+        """Initialize weights with spectral radius control for recurrent weights."""
         # Input weights: Gaussian with small variance
         nn.init.normal_(self.w_in.weight, mean=0.0, std=1.0 / np.sqrt(self.input_size))
-        
-        # Recurrent weights: Gaussian with variance scaled by hidden size
+
+        # Recurrent weights: random Gaussian, then rescale to target spectral radius
         nn.init.normal_(self.w_rec.weight, mean=0.0, std=1.0 / np.sqrt(self.hidden_size))
+        with torch.no_grad():
+            eigvals = torch.linalg.eigvals(self.w_rec.weight)
+            current_radius = eigvals.abs().max().item()
+            if current_radius > 0:
+                self.w_rec.weight.mul_(spectral_radius / current_radius)
         nn.init.constant_(self.w_rec.bias, 0.0)
-        
-        # Output weights: small random initialization
-        nn.init.normal_(self.w_out.weight, mean=0.0, std=1.0 / np.sqrt(self.hidden_size))
+
+        # Output weights: scaled so initial output std is O(1)
+        nn.init.normal_(self.w_out.weight, mean=0.0, std=1.0 / np.sqrt(self.hidden_size) * 2)
         nn.init.constant_(self.w_out.bias, 0.0)
     
     def _create_dale_mask(self) -> torch.Tensor:
@@ -130,62 +135,73 @@ class RateRNN(nn.Module):
     def forward(
         self,
         inputs: torch.Tensor,
-        hidden: Optional[torch.Tensor] = None
+        hidden: Optional[torch.Tensor] = None,
+        return_states: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass through the RNN.
-        
+
         Args:
             inputs: Input tensor of shape (batch, time, input_size)
             hidden: Initial hidden state of shape (batch, hidden_size)
                    If None, initialized to zeros
-        
+            return_states: If True, return full hidden state trajectory as third element
+
         Returns:
             outputs: Output time series of shape (batch, time) - one scalar per timestep
             hidden: Final hidden state of shape (batch, hidden_size)
+            states: (only if return_states=True) Hidden states (batch, time, hidden_size)
         """
         batch_size, seq_len, _ = inputs.shape
-        
+
         # Initialize hidden state if not provided
         h: torch.Tensor
         if hidden is None:
             h = torch.zeros(batch_size, self.hidden_size, device=self.device)
         else:
             h = hidden
-        
+
         # Store outputs for all time steps
         outputs = []
-        
+        if return_states:
+            states = []
+
         # Process each time step
         for t in range(seq_len):
             # Get input at current time step
             x_t = inputs[:, t, :]
-            
+
             # Update hidden state using discretized dynamics
             # τ * dr/dt = -r + f(W_rec * r + W_in * x + b)
             # Discretized: r_new = (1 - α) * r + α * f(...)
             input_current = self.w_in(x_t)
             recurrent_current = self.w_rec(h)
             total_current = input_current + recurrent_current
-            
+
             # Add noise if specified
             if self.noise_std > 0 and self.training:
                 noise = torch.randn_like(total_current) * self.noise_std
                 total_current = total_current + noise
-            
+
             # Apply activation function
             activated = self.activation(total_current)
-            
+
             # Update hidden state with discretized dynamics
             h = (1 - self.alpha) * h + self.alpha * activated
-            
+
             # Compute linear readout at current time step
             output_t = self.w_out(h)  # (batch, 1)
             outputs.append(output_t.squeeze(-1))  # (batch,)
-        
+            if return_states:
+                states.append(h)
+
         # Stack outputs into time series (batch, time)
         outputs_tensor = torch.stack(outputs, dim=1)
-        
+
+        if return_states:
+            states_tensor = torch.stack(states, dim=1)  # (batch, time, hidden_size)
+            return outputs_tensor, h, states_tensor
+
         return outputs_tensor, h
     
     def compute_regularization_loss(self) -> torch.Tensor:

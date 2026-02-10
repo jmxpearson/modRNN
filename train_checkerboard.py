@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau, _LRScheduler
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 import json
@@ -309,7 +310,13 @@ class Trainer:
             
             # Plot progress
             if epoch % plot_every == 0:
-                self.plot_training_history()
+                self.plot_training_history(show=False)
+                plot_neural_analysis(
+                    self.model, self.val_loader, self.device,
+                    save_path=str(self.save_dir / 'neural_analysis.png'),
+                    show=False
+                )
+                plt.show()
         
         print("\nTraining completed!")
         self.save_checkpoint('final_model.pt', n_epochs)
@@ -334,7 +341,7 @@ class Trainer:
         self.best_val_loss = checkpoint['best_val_loss']
         return checkpoint['epoch']
     
-    def plot_training_history(self, save: bool = True):
+    def plot_training_history(self, save: bool = True, show: bool = True):
         """Plot training history."""
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
@@ -380,7 +387,8 @@ class Trainer:
         if save:
             plt.savefig(self.save_dir / 'training_history.png', dpi=150, bbox_inches='tight')
 
-        plt.show()
+        if show:
+            plt.show()
 
 
 def plot_example_predictions(
@@ -453,6 +461,150 @@ def plot_example_predictions(
     plt.show()
 
 
+def plot_neural_analysis(
+    model: RateRNN,
+    val_loader: DataLoader,
+    device: str,
+    n_neurons: int = 10,
+    n_readout_trials: int = 10,
+    save_path: str = './checkpoints/neural_analysis.png',
+    show: bool = True
+):
+    """
+    Plot neural analysis figure with 4 panels:
+    1. Individual neuron traces on a single trial
+    2. Model readout vs target for that trial
+    3. Model readouts across several trials
+    4. Population PCA trajectories across the validation set
+    """
+    model.eval()
+    val_dataset = val_loader.dataset
+    assert isinstance(val_dataset, DelayedMatchToEvidenceDataset)
+
+    # Collect outputs and hidden states for the full validation set
+    all_outputs = []   # list of (time,) arrays
+    all_targets = []   # list of (time,) arrays
+    all_states = []    # list of (time, hidden) arrays
+    all_lengths = []   # actual sequence lengths
+    all_infos = []
+
+    with torch.no_grad():
+        for batch_inputs, batch_targets, batch_lengths in val_loader:
+            batch_inputs = batch_inputs.to(device)
+            outputs, _, states = model(batch_inputs, return_states=True)
+            outputs = outputs.cpu().numpy()
+            states = states.cpu().numpy()
+            batch_targets = batch_targets.numpy()
+            batch_lengths = batch_lengths.numpy()
+
+            for i in range(outputs.shape[0]):
+                seq_len = int(batch_lengths[i])
+                all_outputs.append(outputs[i, :seq_len])
+                all_targets.append(batch_targets[i, :seq_len])
+                all_states.append(states[i, :seq_len])
+                all_lengths.append(seq_len)
+
+    for idx in range(len(val_dataset)):
+        all_infos.append(val_dataset.get_trial_info(idx))
+
+    # Pick a reference trial for panels 1 & 2 (middle-length trial)
+    median_len = int(np.median(all_lengths))
+    ref_idx = int(np.argmin(np.abs(np.array(all_lengths) - median_len)))
+    ref_info = all_infos[ref_idx]
+
+    # Pick neuron indices (highest-variance neurons on the reference trial)
+    ref_states = all_states[ref_idx]  # (time, hidden)
+    neuron_var = np.var(ref_states, axis=0)
+    neuron_idxs = np.argsort(neuron_var)[-n_neurons:]
+
+    # Pick trials for panel 3 (spread of correct sides and coherences)
+    trial_indices = np.random.choice(len(all_outputs), size=min(n_readout_trials, len(all_outputs)), replace=False)
+
+    # --- Build figure ---
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Helper: shade task epochs
+    def shade_epochs(ax, info, t_max):
+        s_end = info['sample_duration']
+        d_end = s_end + info['delay_duration']
+        ax.axvspan(0, s_end, alpha=0.08, color='tab:blue')
+        ax.axvspan(s_end, d_end, alpha=0.08, color='tab:orange')
+        ax.axvspan(d_end, t_max, alpha=0.08, color='tab:green')
+        ax.axvline(s_end, color='k', ls='--', lw=0.8, alpha=0.4)
+        ax.axvline(d_end, color='purple', ls='--', lw=0.8, alpha=0.4)
+
+    # --- Panel 1: individual neuron traces ---
+    ax = axes[0, 0]
+    time_axis = np.arange(all_lengths[ref_idx]) * val_dataset.time_bin_size
+    for j, nidx in enumerate(neuron_idxs):
+        ax.plot(time_axis, ref_states[:, nidx], lw=1, alpha=0.8, label=f'n{nidx}')
+    shade_epochs(ax, ref_info, time_axis[-1])
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Firing rate')
+    ax.set_title(f'Single-trial neuron traces (trial {ref_idx})')
+    ax.grid(True, alpha=0.3)
+
+    # --- Panel 2: readout vs target for reference trial ---
+    ax = axes[0, 1]
+    ax.plot(time_axis, all_targets[ref_idx], 'k-', lw=2, label='Target')
+    ax.plot(time_axis, all_outputs[ref_idx], 'r-', lw=2, label='Model')
+    shade_epochs(ax, ref_info, time_axis[-1])
+    ax.axhline(0, color='gray', lw=0.5, alpha=0.3)
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Output')
+    ax.set_ylim(-1.5, 1.5)
+    ax.set_title(f'Readout vs target (trial {ref_idx})')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    # --- Panel 3: readouts across multiple trials ---
+    ax = axes[1, 0]
+    for ti in trial_indices:
+        t_ax = np.arange(all_lengths[ti]) * val_dataset.time_bin_size
+        target_sign = np.sign(all_targets[ti][-1])
+        color = 'tab:blue' if target_sign < 0 else 'tab:red'
+        ax.plot(t_ax, all_outputs[ti], color=color, lw=1, alpha=0.6)
+    # Legend proxy
+    ax.plot([], [], color='tab:blue', lw=2, label='Target = -1')
+    ax.plot([], [], color='tab:red', lw=2, label='Target = +1')
+    ax.axhline(0, color='gray', lw=0.5, alpha=0.3)
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Model readout')
+    ax.set_ylim(-1.5, 1.5)
+    ax.set_title(f'Model readouts ({len(trial_indices)} trials)')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    # --- Panel 4: PCA trajectories ---
+    ax = axes[1, 1]
+    # Concatenate all hidden states, fit PCA
+    concat_states = np.concatenate(all_states, axis=0)
+    pca = PCA(n_components=3)
+    pca.fit(concat_states)
+
+    # Project each trial and plot in 3D
+    ax.remove()
+    ax = fig.add_subplot(2, 2, 4, projection='3d')
+    for ti in range(len(all_states)):
+        proj = pca.transform(all_states[ti])  # (time, 3)
+        target_sign = np.sign(all_targets[ti][-1])
+        color = 'tab:blue' if target_sign < 0 else 'tab:red'
+        ax.plot(proj[:, 0], proj[:, 1], proj[:, 2], color=color, lw=0.5, alpha=0.3)
+    ax.plot([], [], [], color='tab:blue', lw=2, label='Target = -1')
+    ax.plot([], [], [], color='tab:red', lw=2, label='Target = +1')
+    ax.set_xlabel('PC1')
+    ax.set_ylabel('PC2')
+    ax.set_zlabel('PC3')
+    ax.set_title('Population trajectories (PCA)')
+    ax.legend(loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+
+    if show:
+        plt.show()
+
+
 def main():
     """Main training script."""
     # Set random seeds for reproducibility
@@ -467,7 +619,7 @@ def main():
     train_trials = 2000
     val_trials = 500
     test_trials = 500
-    batch_size = 32
+    batch_size = 64
     n_checkerboard_channels = 10
     dataset_kwargs = {'n_checkerboard_channels': n_checkerboard_channels}
 
@@ -488,10 +640,10 @@ def main():
     print("Creating model...")
     model = RateRNN(
         input_size=input_size,
-        hidden_size=256,
+        hidden_size=64,
         dt=20.0,
         tau=100.0,
-        activation='relu',
+        activation='tanh',
         noise_std=0.01,  # Reduced noise for stability
         dale_ratio=None,  # Disable Dale's law initially for stability
         alpha=1e-5,  # Reduced L2 regularization
@@ -505,11 +657,10 @@ def main():
     
     # Learning rate scheduler
     scheduler = ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5, 
-        patience=10, 
-        verbose=True
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=10
     )
     
     # Create trainer
@@ -529,7 +680,7 @@ def main():
     trainer.train(
         n_epochs=100,
         save_every=10,
-        plot_every=5,
+        plot_every=25,
         scheduler=scheduler
     )
     

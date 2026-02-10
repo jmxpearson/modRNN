@@ -8,6 +8,7 @@ dependencies = [
     "ipython>=8.38.0",
     "matplotlib>=3.10.8",
     "numpy<2",
-    "torch==2.2",
+    "scikit-learn>=1.7.2",
+    "torch>=2.2",
     "tqdm>=4.67.1",
 ]
