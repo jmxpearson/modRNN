@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 
 class RateRNN(nn.Module):
@@ -172,7 +172,7 @@ class RateRNN(nn.Module):
         inputs: torch.Tensor,
         hidden: Optional[torch.Tensor] = None,
         return_states: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
         Forward pass through the RNN.
 
