@@ -185,7 +185,7 @@ class DelayedMatchToEvidenceDataset(Dataset):
         # If predom=white(+1) & side=left(-1) -> correct=+1 (right)
         # If predom=white(+1) & side=right(+1) -> correct=-1 (left)
         correct_side = -empirical_predom_color * test_side
-        target_output[delay_end_idx:] = float(correct_side)
+        target_output[delay_end_idx:] = 50. * float(correct_side)
         
         return {
             'sample_cue': sample_cue,

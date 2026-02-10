@@ -616,10 +616,10 @@ def main():
     print(f"Using device: {device}")
     
     # Dataset parameters
-    train_trials = 2000
+    train_trials = 32 * 100
     val_trials = 500
     test_trials = 500
-    batch_size = 64
+    batch_size = 32 
     n_checkerboard_channels = 10
     dataset_kwargs = {'n_checkerboard_channels': n_checkerboard_channels}
 
@@ -640,10 +640,10 @@ def main():
     print("Creating model...")
     model = RateRNN(
         input_size=input_size,
-        hidden_size=64,
+        hidden_size=256,
         dt=20.0,
         tau=100.0,
-        activation='tanh',
+        activation='relu',
         noise_std=0.01,  # Reduced noise for stability
         dale_ratio=None,  # Disable Dale's law initially for stability
         alpha=1e-5,  # Reduced L2 regularization
@@ -651,18 +651,22 @@ def main():
     ).to(device)
     
     print(f"Model has {sum(p.numel() for p in model.parameters())} parameters")
-    
+
     # Create optimizer with lower learning rate
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     
-    # Learning rate scheduler
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=10
-    )
-    
+    # Learning rate scheduler (optional)
+    use_scheduler = False
+    if use_scheduler:
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=10
+        )
+    else:
+        scheduler = None
+
     # Create trainer
     trainer = Trainer(
         model=model,
@@ -678,9 +682,9 @@ def main():
     
     # Train model
     trainer.train(
-        n_epochs=100,
+        n_epochs=500,
         save_every=10,
-        plot_every=25,
+        plot_every=50,
         scheduler=scheduler
     )
     

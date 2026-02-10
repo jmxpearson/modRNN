@@ -6,25 +6,23 @@ from typing import Optional, Tuple
 
 class RateRNN(nn.Module):
     """
-    Rate-based recurrent neural network for cognitive tasks.
-    
-    Based on Yang et al. (2018) Nature Neuroscience:
-    "Task representations in neural networks trained to perform many cognitive tasks"
-    
+    Voltage-based recurrent neural network for cognitive tasks.
+
     The network dynamics follow:
-    τ * dr/dt = -r + f(W_rec * r + W_in * x + b_rec)
-    
+    τ * dv/dt = -v + W_rec * f(v) + W_in * x + b_rec
+
     where:
-    - r is the firing rate of recurrent units
+    - v is the membrane voltage of recurrent units
     - f is the activation function (ReLU, tanh, or softplus)
+    - f(v) gives the firing rates
     - W_rec is the recurrent weight matrix
     - W_in is the input weight matrix
     - x is the external input
     - b_rec is the recurrent bias
     - τ is the time constant
-    
+
     Output is a linear readout of firing rates at each timestep:
-    y(t) = w_out^T * r(t) + b_out
+    y(t) = w_out^T * f(v(t)) + b_out
     """
     
     def __init__(
@@ -33,7 +31,7 @@ class RateRNN(nn.Module):
         hidden_size: int,
         dt: float = 20.0,  # ms, discretization time step
         tau: float = 100.0,  # ms, time constant
-        activation: str = 'relu',
+        activation: str = 'tanh',
         noise_std: float = 0.0,
         dale_ratio: Optional[float] = None,  # fraction of excitatory units (0.8 for Dale's law)
         alpha: Optional[float] = None,  # L2 regularization weight
@@ -62,7 +60,7 @@ class RateRNN(nn.Module):
         self.dale_ratio = dale_ratio
         self.device = device
         
-        # Discretization: new_r = (1 - dt/tau) * r + (dt/tau) * f(...)
+        # Discretization: new_v = (1 - dt/tau) * v + (dt/tau) * (W_rec * f(v) + W_in * x + b)
         self.alpha = dt / tau
         
         # Initialize activation function
@@ -92,8 +90,9 @@ class RateRNN(nn.Module):
             self.register_buffer('dale_mask', self._create_dale_mask())
         else:
             self.dale_mask = None
+
     
-    def _initialize_weights(self, spectral_radius: float = 1.2):
+    def _initialize_weights(self, spectral_radius: float = 1.8):
         """Initialize weights with spectral radius control for recurrent weights."""
         # Input weights: Gaussian with small variance
         nn.init.normal_(self.w_in.weight, mean=0.0, std=1.0 / np.sqrt(self.input_size))
@@ -143,23 +142,23 @@ class RateRNN(nn.Module):
 
         Args:
             inputs: Input tensor of shape (batch, time, input_size)
-            hidden: Initial hidden state of shape (batch, hidden_size)
+            hidden: Initial voltage state of shape (batch, hidden_size)
                    If None, initialized to zeros
-            return_states: If True, return full hidden state trajectory as third element
+            return_states: If True, return full firing rate trajectory as third element
 
         Returns:
             outputs: Output time series of shape (batch, time) - one scalar per timestep
-            hidden: Final hidden state of shape (batch, hidden_size)
-            states: (only if return_states=True) Hidden states (batch, time, hidden_size)
+            hidden: Final voltage state of shape (batch, hidden_size)
+            states: (only if return_states=True) Firing rates (batch, time, hidden_size)
         """
         batch_size, seq_len, _ = inputs.shape
 
-        # Initialize hidden state if not provided
-        h: torch.Tensor
+        # Initialize voltage if not provided
+        v: torch.Tensor
         if hidden is None:
-            h = torch.zeros(batch_size, self.hidden_size, device=self.device)
+            v = torch.zeros(batch_size, self.hidden_size, device=self.device)
         else:
-            h = hidden
+            v = hidden
 
         # Store outputs for all time steps
         outputs = []
@@ -171,38 +170,38 @@ class RateRNN(nn.Module):
             # Get input at current time step
             x_t = inputs[:, t, :]
 
-            # Update hidden state using discretized dynamics
-            # τ * dr/dt = -r + f(W_rec * r + W_in * x + b)
-            # Discretized: r_new = (1 - α) * r + α * f(...)
+            # Compute firing rates from voltage
+            rates = self.activation(v)
+
+            # Update voltage using discretized dynamics
+            # τ * dv/dt = -v + W_rec * f(v) + W_in * x + b_rec
+            # Discretized: v_new = (1 - α) * v + α * (W_rec * f(v) + W_in * x + b_rec)
             input_current = self.w_in(x_t)
-            recurrent_current = self.w_rec(h)
-            total_current = input_current + recurrent_current
+            recurrent_current = self.w_rec(rates)
+            drive = input_current + recurrent_current
 
             # Add noise if specified
             if self.noise_std > 0 and self.training:
-                noise = torch.randn_like(total_current) * self.noise_std
-                total_current = total_current + noise
+                noise = torch.randn_like(drive) * self.noise_std
+                drive = drive + noise
 
-            # Apply activation function
-            activated = self.activation(total_current)
+            v = (1 - self.alpha) * v + self.alpha * drive
 
-            # Update hidden state with discretized dynamics
-            h = (1 - self.alpha) * h + self.alpha * activated
-
-            # Compute linear readout at current time step
-            output_t = self.w_out(h)  # (batch, 1)
+            # Compute linear readout from firing rates
+            rates_new = self.activation(v)
+            output_t = self.w_out(rates_new)  # (batch, 1)
             outputs.append(output_t.squeeze(-1))  # (batch,)
             if return_states:
-                states.append(h)
+                states.append(rates_new)
 
         # Stack outputs into time series (batch, time)
         outputs_tensor = torch.stack(outputs, dim=1)
 
         if return_states:
             states_tensor = torch.stack(states, dim=1)  # (batch, time, hidden_size)
-            return outputs_tensor, h, states_tensor
+            return outputs_tensor, v, states_tensor
 
-        return outputs_tensor, h
+        return outputs_tensor, v
     
     def compute_regularization_loss(self) -> torch.Tensor:
         """
