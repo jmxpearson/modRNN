@@ -30,7 +30,9 @@ class Trainer:
         save_dir: str = './checkpoints',
         train_trials: int = 2000,
         batch_size: int = 32,
-        dataset_kwargs: Optional[Dict] = None
+        dataset_kwargs: Optional[Dict] = None,
+        curriculum_phases: Optional[List[List[str]]] = None,
+        curriculum_threshold: float = 0.8
     ):
         """
         Args:
@@ -43,6 +45,10 @@ class Trainer:
             train_trials: Number of training trials per epoch
             batch_size: Batch size for training
             dataset_kwargs: Additional kwargs for dataset creation
+            curriculum_phases: List of period-name lists for curriculum learning,
+                e.g. [['test'], ['delay', 'test'], ['sample', 'delay', 'test']].
+                If None, all timesteps are penalized (no curriculum).
+            curriculum_threshold: Validation accuracy threshold to advance phase
         """
         self.model = model
         self.train_loader = train_loader
@@ -56,21 +62,27 @@ class Trainer:
         self.batch_size = batch_size
         self.dataset_kwargs = dataset_kwargs if dataset_kwargs is not None else {}
         self.save_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Loss function: MSE between model output and target
         self.criterion = nn.MSELoss(reduction='none')  # No reduction for masking
-        
+
+        # Curriculum learning
+        self.curriculum_phases = curriculum_phases
+        self.curriculum_threshold = curriculum_threshold
+        self._curriculum_phase_idx = 0
+
         # Training history
-        self.history: Dict[str, List[float]] = {
+        self.history: Dict[str, List] = {
             'train_loss': [],
             'train_task_loss': [],
             'train_reg_loss': [],
             'train_accuracy': [],
             'val_loss': [],
             'val_accuracy': [],
-            'learning_rate': []
+            'learning_rate': [],
+            'curriculum_phase': []
         }
-        
+
         self.best_val_loss = float('inf')
 
     def _regenerate_train_loader(self, seed: int):
@@ -87,36 +99,69 @@ class Trainer:
             collate_fn=collate_variable_length_trials
         )
 
-    def masked_loss(
-        self, 
-        outputs: torch.Tensor, 
-        targets: torch.Tensor, 
-        lengths: torch.Tensor
+    def _build_period_mask(
+        self,
+        batch_inputs: torch.Tensor,
+        lengths: torch.Tensor,
+        active_periods: List[str]
     ) -> torch.Tensor:
         """
-        Compute masked MSE loss that ignores padded timesteps.
-        
+        Build a (batch, time) mask that is 1.0 for timesteps in active
+        periods and within valid sequence length, 0.0 otherwise.
+
+        Uses the cue channels already present in the inputs:
+          channel 0 = sample_cue, channel 1 = delay_cue, channel 2 = test_cue.
+        """
+        batch_size, max_len, _ = batch_inputs.shape
+
+        # Padding mask
+        pad_mask = torch.arange(max_len, device=batch_inputs.device).unsqueeze(0) < lengths.unsqueeze(1)
+
+        # Period mask: OR together the cue channels for active periods
+        cue_map = {'sample': 0, 'delay': 1, 'test': 2}
+        period_mask = torch.zeros(batch_size, max_len, device=batch_inputs.device)
+        for period_name in active_periods:
+            period_mask += batch_inputs[:, :, cue_map[period_name]]
+        period_mask = (period_mask > 0).float()
+
+        return pad_mask.float() * period_mask
+
+    def masked_loss(
+        self,
+        outputs: torch.Tensor,
+        targets: torch.Tensor,
+        lengths: torch.Tensor,
+        period_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Compute masked MSE loss that ignores padded timesteps and
+        optionally restricts to specific trial periods.
+
         Args:
             outputs: (batch, time)
             targets: (batch, time)
             lengths: (batch,) actual sequence lengths
-            
+            period_mask: Optional (batch, time) mask from _build_period_mask
+
         Returns:
             loss: Scalar loss value
         """
         # Compute element-wise loss
         losses = self.criterion(outputs, targets)  # (batch, time)
-        
-        # Create mask
-        batch_size, max_len = outputs.shape
-        mask = torch.arange(max_len, device=outputs.device).unsqueeze(0) < lengths.unsqueeze(1)
-        mask = mask.float()  # (batch, max_len)
-        
+
+        if period_mask is not None:
+            mask = period_mask
+        else:
+            # Original behavior: padding mask only
+            batch_size, max_len = outputs.shape
+            mask = torch.arange(max_len, device=outputs.device).unsqueeze(0) < lengths.unsqueeze(1)
+            mask = mask.float()
+
         # Apply mask and compute mean
         masked_losses = losses * mask
         total_loss = masked_losses.sum()
         total_valid = mask.sum()
-        
+
         return total_loss / total_valid if total_valid > 0 else total_loss
     
     def train_epoch(self) -> Tuple[float, float, float, float]:
@@ -149,8 +194,15 @@ class Trainer:
             # Forward pass
             outputs, _ = self.model(batch_inputs)  # (batch, time)
 
+            # Build period mask for curriculum learning
+            if self.curriculum_phases is not None:
+                active = self.curriculum_phases[self._curriculum_phase_idx]
+                period_mask = self._build_period_mask(batch_inputs, batch_lengths, active)
+            else:
+                period_mask = None
+
             # Compute task loss with masking
-            task_loss = self.masked_loss(outputs, batch_targets, batch_lengths)
+            task_loss = self.masked_loss(outputs, batch_targets, batch_lengths, period_mask=period_mask)
 
             # Compute regularization loss
             reg_loss = self.model.compute_regularization_loss()
@@ -257,8 +309,19 @@ class Trainer:
         print(f"Starting training for {n_epochs} epochs...")
         print(f"Device: {self.device}")
         print(f"Number of parameters: {sum(p.numel() for p in self.model.parameters())}")
-        
+        if self.curriculum_phases is not None:
+            phase_label = '+'.join(self.curriculum_phases[self._curriculum_phase_idx])
+            print(f"Curriculum: starting with loss on [{phase_label}], "
+                  f"advancing at val_accuracy >= {self.curriculum_threshold}")
+
         for epoch in range(1, n_epochs + 1):
+            # Log curriculum phase
+            if self.curriculum_phases is not None:
+                phase_label = '+'.join(self.curriculum_phases[self._curriculum_phase_idx])
+                self.history['curriculum_phase'].append(self._curriculum_phase_idx)
+            else:
+                self.history['curriculum_phase'].append(None)
+
             print(f"\nEpoch {epoch}/{n_epochs}")
 
             # Regenerate training data with a new seed each epoch
@@ -290,6 +353,15 @@ class Trainer:
             print(f"Val Loss: {val_loss:.4f}")
             print(f"Train Accuracy: {train_accuracy:.4f}, Val Accuracy: {val_accuracy:.4f}")
             print(f"Learning Rate: {current_lr:.6f}")
+
+            # Curriculum: advance phase if accuracy threshold reached
+            if (self.curriculum_phases is not None
+                    and self._curriculum_phase_idx < len(self.curriculum_phases) - 1
+                    and val_accuracy >= self.curriculum_threshold):
+                self._curriculum_phase_idx += 1
+                new_label = '+'.join(self.curriculum_phases[self._curriculum_phase_idx])
+                print(f"  [Curriculum] Advancing to phase {self._curriculum_phase_idx}: "
+                      f"loss on [{new_label}]")
             
             # Update learning rate scheduler
             if scheduler is not None:
@@ -667,6 +739,14 @@ def main():
     else:
         scheduler = None
 
+    # Curriculum schedule: gradually expand loss coverage
+    curriculum_phases = [
+        ['test'],                        # Phase 0: test period only
+        ['delay', 'test'],               # Phase 1: add delay
+        ['sample', 'delay', 'test'],     # Phase 2: full trial
+    ]
+    curriculum_threshold = 0.8
+
     # Create trainer
     trainer = Trainer(
         model=model,
@@ -677,7 +757,9 @@ def main():
         save_dir='./checkpoints',
         train_trials=train_trials,
         batch_size=batch_size,
-        dataset_kwargs=dataset_kwargs
+        dataset_kwargs=dataset_kwargs,
+        curriculum_phases=curriculum_phases,
+        curriculum_threshold=curriculum_threshold
     )
     
     # Train model
