@@ -59,8 +59,11 @@ def plot_weight_matrices(
     permuted accordingly so edges align when displayed together.
 
     Layout:
-        [Output^T] [Recurrent]
-                   [Input^T  ]
+        [Output] [    Recurrent     ]
+                 [Input][   empty   ]
+
+    The input matrix only spans the first n_input_neurons columns,
+    corresponding to neurons that receive task input.
 
     Args:
         model: Trained RateRNN model
@@ -76,14 +79,20 @@ def plot_weight_matrices(
     hidden_size, input_size = W_in.shape
     output_size = W_out.shape[0]
 
+    # Determine how many neurons receive input
+    if model.input_fraction is not None:
+        n_input_neurons = int(model.input_fraction * hidden_size)
+    else:
+        n_input_neurons = hidden_size
+
     # Cluster the recurrent matrix - separate orderings for rows and columns
     row_order, col_order = cluster_and_reorder(W_rec, method=method)
 
     # Reorder matrices according to clustering
     # Recurrent: rows reordered by row_order, cols reordered by col_order
     W_rec_ordered = W_rec[np.ix_(row_order, col_order)]
-    # Input weights: columns of W_in map to rows of recurrent (input -> hidden)
-    # So permute rows of W_in by col_order (to align with recurrent columns when transposed below)
+    # Input weights: rows of W_in are hidden neurons, cols are input features
+    # Permute rows by col_order so input matrix columns align with recurrent matrix columns
     W_in_ordered = W_in[col_order, :]
     # Output weights: rows of W_out read from hidden neurons
     # So permute cols of W_out by row_order (to align with recurrent rows when transposed left)
@@ -96,34 +105,51 @@ def plot_weight_matrices(
     vmax = np.percentile(np.abs(all_weights), 99)
     vmin = -vmax
 
-    # Create figure with GridSpec for precise alignment
-    # Use fixed pixel sizes for alignment
-    output_width = 0.5  # inches for output strip
-    rec_width = 8.0     # inches for recurrent matrix
-    input_height = 1.5  # inches for input matrix
-    rec_height = 8.0    # inches for recurrent matrix
+    # Create figure with manual axes positioning for precise alignment
+    # All positions in normalized figure coordinates [left, bottom, width, height]
+    margin_left = 0.08
+    margin_right = 0.12  # space for colorbar
+    margin_bottom = 0.08
+    margin_top = 0.08
+    gap = 0.10  # gap between subplots
 
-    fig_width = output_width + rec_width + 1.5  # extra for colorbar/margins
-    fig_height = rec_height + input_height + 1.0
+    # Calculate available space
+    total_width = 1.0 - margin_left - margin_right
+    total_height = 1.0 - margin_bottom - margin_top
 
+    # Relative sizes (in arbitrary units, will be normalized)
+    output_rel = 0.5
+    rec_rel = 8.0
+    input_height_rel = 1.5
+    rec_height_rel = 8.0
+
+    # Normalize widths
+    total_width_rel = output_rel + gap + rec_rel
+    output_w = (output_rel / total_width_rel) * total_width
+    rec_w = (rec_rel / total_width_rel) * total_width
+    gap_w = (gap / total_width_rel) * total_width
+
+    # Normalize heights
+    total_height_rel = rec_height_rel + gap + input_height_rel
+    rec_h = (rec_height_rel / total_height_rel) * total_height
+    input_h = (input_height_rel / total_height_rel) * total_height
+    gap_h = (gap / total_height_rel) * total_height
+
+    # Input width is fraction of recurrent width
+    input_w = rec_w * (n_input_neurons / hidden_size)
+
+    # Calculate positions
+    output_left = margin_left
+    rec_left = output_left + output_w + gap_w
+    rec_bottom = margin_bottom + input_h + gap_h
+    input_bottom = margin_bottom
+
+    fig_width = 10.0
+    fig_height = fig_width * (total_height_rel / total_width_rel) * 1.1
     fig = plt.figure(figsize=(fig_width, fig_height))
 
-    # Define grid with proper ratios for alignment
-    # The recurrent matrix and input matrix must share the same horizontal extent
-    gs = fig.add_gridspec(
-        2, 2,
-        width_ratios=[output_width, rec_width],
-        height_ratios=[rec_height, input_height],
-        wspace=0.02,
-        hspace=0.02,
-        left=0.08,
-        right=0.88,
-        top=0.92,
-        bottom=0.08,
-    )
-
-    # Output weights (left of recurrent) - transpose so hidden neurons are vertical
-    ax_out = fig.add_subplot(gs[0, 0])
+    # Output weights (left of recurrent)
+    ax_out = fig.add_axes([output_left, rec_bottom, output_w, rec_h])
     im_out = ax_out.imshow(
         W_out_ordered.T,  # (hidden, 1)
         aspect="auto",
@@ -136,11 +162,11 @@ def plot_weight_matrices(
     ax_out.set_xticks([])
     ax_out.set_yticks([])
 
-    # Recurrent weights (center-right, top)
-    ax_rec = fig.add_subplot(gs[0, 1])
+    # Recurrent weights
+    ax_rec = fig.add_axes([rec_left, rec_bottom, rec_w, rec_h])
     im_rec = ax_rec.imshow(
         W_rec_ordered,
-        aspect="equal",
+        aspect="auto",  # use auto to fill axes exactly
         cmap="RdBu_r",
         vmin=vmin,
         vmax=vmax,
@@ -149,28 +175,26 @@ def plot_weight_matrices(
     ax_rec.set_xticks([])
     ax_rec.set_yticks([])
 
-    # Empty subplot (bottom-left corner)
-    ax_empty = fig.add_subplot(gs[1, 0])
-    ax_empty.axis("off")
-
-    # Input weights (below recurrent) - transpose so hidden neurons are horizontal
-    ax_in = fig.add_subplot(gs[1, 1])
+    # Input weights (below left portion of recurrent) - aligned with rec_left
+    ax_in = fig.add_axes([rec_left, input_bottom, input_w, input_h])
+    W_in_display = W_in_ordered[:n_input_neurons, :].T  # (input_size, n_input_neurons)
     im_in = ax_in.imshow(
-        W_in_ordered.T,  # (input, hidden)
+        W_in_display,
         aspect="auto",
         cmap="RdBu_r",
         vmin=vmin,
         vmax=vmax,
     )
-    ax_in.set_xlabel("Input Weights\n(from neuron, clustered)", fontsize=10)
+    ax_in.set_xlabel("To neuron (clustered)", fontsize=10)
     ax_in.set_xticks([])
     # Label input features on y-axis
     input_labels = ["fixation", "test_side", "go_cue", "hold_cue"] + [f"chk{i}" for i in range(input_size - 4)]
     ax_in.set_yticks(range(input_size))
     ax_in.set_yticklabels(input_labels, fontsize=8)
+    ax_in.set_ylabel("Input Weights", fontsize=10)
 
-    # Add colorbar
-    cbar_ax = fig.add_axes([0.90, 0.25, 0.02, 0.55])
+    # Add colorbar (positioned relative to recurrent matrix)
+    cbar_ax = fig.add_axes([rec_left + rec_w + 0.01, rec_bottom, 0.02, rec_h])
     cbar = fig.colorbar(im_rec, cax=cbar_ax)
     cbar.set_label("Weight value", fontsize=10)
 
@@ -203,13 +227,14 @@ if __name__ == "__main__":
         activation="relu",
         noise_std=0.01,
         dale_ratio=None,
+        input_fraction=0.125,  # 1/8 of neurons receive task input
         alpha=1e-5,
         device=device,
     ).to(device)
 
-    # Load best model weights
+    # Load best model weights (strict=False to allow input_mask mismatch)
     checkpoint = torch.load("./checkpoints/best_model.pt", map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
     print(f"Loaded model from epoch {checkpoint['epoch']}")
 
     # Plot with both clustering methods
