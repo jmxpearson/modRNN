@@ -17,6 +17,7 @@ from checkerboard import (
     collate_variable_length_trials,
 )
 from model import RateRNN
+from plot_weights import plot_weight_matrices
 
 
 class Trainer:
@@ -851,7 +852,7 @@ def main():
     )
 
     # Train model
-    trainer.train(n_epochs=1000, save_every=10, plot_every=25, scheduler=scheduler)
+    trainer.train(n_epochs=1000, save_every=10, plot_every=1000, scheduler=scheduler)
 
     # Load best model
     print("\nLoading best model...")
@@ -923,6 +924,10 @@ def main():
 
     with open("./checkpoints/results.json", "w") as f:
         json.dump(results, f, indent=2)
+
+    # Plot weight matrices
+    print("\nPlotting weight matrices...")
+    plot_weight_matrices(model, method="ward", save_path="./plots/weight_matrices_ward.png", show=False)
 
     print("\nTraining complete! Results saved to ./checkpoints/")
 
