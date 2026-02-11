@@ -39,6 +39,8 @@ class RateRNN(nn.Module):
         input_fraction: Optional[
             float
         ] = None,  # fraction of neurons receiving task input (e.g., 0.125)
+        n_input_e: Optional[int] = None,  # number of excitatory neurons receiving input
+        n_input_i: Optional[int] = None,  # number of inhibitory neurons receiving input
         alpha: Optional[float] = None,  # L2 regularization weight
         device: str = "cpu",
     ):
@@ -52,6 +54,8 @@ class RateRNN(nn.Module):
             noise_std: Standard deviation of noise added to hidden units
             dale_ratio: If set, enforce Dale's law with this fraction of excitatory units
             input_fraction: If set, only this fraction of neurons receive task input
+            n_input_e: Number of excitatory neurons receiving input (requires dale_ratio)
+            n_input_i: Number of inhibitory neurons receiving input (requires dale_ratio)
             alpha: L2 regularization strength for recurrent weights
             device: 'cpu' or 'cuda'
         """
@@ -65,6 +69,8 @@ class RateRNN(nn.Module):
         self.noise_std = noise_std
         self.dale_ratio = dale_ratio
         self.input_fraction = input_fraction
+        self.n_input_e = n_input_e
+        self.n_input_i = n_input_i
         self.device = device
 
         # Discretization: new_v = (1 - dt/tau) * v + (dt/tau) * (W_rec * f(v) + W_in * x + b)
@@ -101,7 +107,13 @@ class RateRNN(nn.Module):
             self.dale_mask = None
 
         # Input mask (if enabled) - only a fraction of neurons receive task input
-        if input_fraction is not None:
+        if n_input_e is not None and n_input_i is not None:
+            # Dale's law input mask: split inputs between E and I populations
+            assert dale_ratio is not None, (
+                "n_input_e and n_input_i require dale_ratio to be set"
+            )
+            self.register_buffer("input_mask", self._create_dale_input_mask())
+        elif input_fraction is not None:
             self.register_buffer("input_mask", self._create_input_mask())
         else:
             self.input_mask = None
@@ -156,6 +168,37 @@ class RateRNN(nn.Module):
         n_input_neurons = int(self.input_fraction * self.hidden_size)
         mask = torch.zeros(self.hidden_size)
         mask[:n_input_neurons] = 1.0  # First input_fraction of neurons receive input
+        return mask
+
+    def _create_dale_input_mask(self) -> torch.Tensor:
+        """
+        Create mask so specified numbers of E and I neurons receive task input.
+
+        With Dale's law, excitatory neurons are indices 0 to n_exc-1,
+        and inhibitory neurons are indices n_exc to hidden_size-1.
+
+        Returns:
+            Mask tensor of shape (hidden_size,) with 1 for neurons receiving input
+            and 0 for neurons that don't.
+        """
+        assert self.dale_ratio is not None, "dale_ratio must be set"
+        assert self.n_input_e is not None and self.n_input_i is not None
+
+        n_exc = int(self.dale_ratio * self.hidden_size)
+        n_inh = self.hidden_size - n_exc
+
+        assert self.n_input_e <= n_exc, (
+            f"n_input_e ({self.n_input_e}) exceeds number of excitatory neurons ({n_exc})"
+        )
+        assert self.n_input_i <= n_inh, (
+            f"n_input_i ({self.n_input_i}) exceeds number of inhibitory neurons ({n_inh})"
+        )
+
+        mask = torch.zeros(self.hidden_size)
+        # First n_input_e excitatory neurons receive input
+        mask[: self.n_input_e] = 1.0
+        # First n_input_i inhibitory neurons receive input (starting at n_exc)
+        mask[n_exc : n_exc + self.n_input_i] = 1.0
         return mask
 
     def apply_dale_constraint(self):

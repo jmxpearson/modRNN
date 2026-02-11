@@ -448,7 +448,8 @@ class Trainer:
     def load_checkpoint(self, filename: str):
         """Load model checkpoint."""
         checkpoint = torch.load(self.save_dir / filename, map_location=self.device)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        # strict=False allows loading checkpoints with different buffer configurations
+        self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.history = checkpoint["history"]
         self.best_val_loss = checkpoint["best_val_loss"]
@@ -816,7 +817,9 @@ def main():
         tau=100.0,
         activation="relu",
         noise_std=0.01,  # Reduced noise for stability
-        dale_ratio=None,  # Disable Dale's law initially for stability
+        dale_ratio=0.8,  # 80% excitatory, 20% inhibitory (Dale's law)
+        n_input_e=32,  # 32 excitatory neurons receive input
+        n_input_i=32,  # 32 inhibitory neurons receive input (64 total)
         alpha=1e-5,  # Reduced L2 regularization
         device=device,
     ).to(device)
@@ -852,7 +855,7 @@ def main():
     )
 
     # Train model
-    trainer.train(n_epochs=1000, save_every=10, plot_every=1000, scheduler=scheduler)
+    trainer.train(n_epochs=1000, save_every=10, plot_every=25, scheduler=scheduler)
 
     # Load best model
     print("\nLoading best model...")

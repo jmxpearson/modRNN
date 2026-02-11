@@ -3,7 +3,6 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.cluster.hierarchy import linkage, leaves_list
-from scipy.spatial.distance import pdist
 from model import RateRNN
 
 
@@ -77,7 +76,6 @@ def plot_weight_matrices(
     W_out = model.w_out.weight.detach().cpu().numpy()  # (1, hidden)
 
     hidden_size, input_size = W_in.shape
-    output_size = W_out.shape[0]
 
     # Determine how many neurons receive input
     if model.input_fraction is not None:
@@ -102,7 +100,7 @@ def plot_weight_matrices(
     all_weights = np.concatenate([W_rec_ordered.flatten(),
                                    W_in_ordered.flatten(),
                                    W_out_ordered.flatten()])
-    vmax = np.percentile(np.abs(all_weights), 99)
+    vmax = float(np.percentile(np.abs(all_weights), 99))
     vmin = -vmax
 
     # Create figure with manual axes positioning for precise alignment
@@ -149,8 +147,8 @@ def plot_weight_matrices(
     fig = plt.figure(figsize=(fig_width, fig_height))
 
     # Output weights (left of recurrent)
-    ax_out = fig.add_axes([output_left, rec_bottom, output_w, rec_h])
-    im_out = ax_out.imshow(
+    ax_out = fig.add_axes((output_left, rec_bottom, output_w, rec_h))
+    ax_out.imshow(
         W_out_ordered.T,  # (hidden, 1)
         aspect="auto",
         cmap="RdBu_r",
@@ -163,7 +161,7 @@ def plot_weight_matrices(
     ax_out.set_yticks([])
 
     # Recurrent weights
-    ax_rec = fig.add_axes([rec_left, rec_bottom, rec_w, rec_h])
+    ax_rec = fig.add_axes((rec_left, rec_bottom, rec_w, rec_h))
     im_rec = ax_rec.imshow(
         W_rec_ordered,
         aspect="auto",  # use auto to fill axes exactly
@@ -176,9 +174,9 @@ def plot_weight_matrices(
     ax_rec.set_yticks([])
 
     # Input weights (below left portion of recurrent) - aligned with rec_left
-    ax_in = fig.add_axes([rec_left, input_bottom, input_w, input_h])
+    ax_in = fig.add_axes((rec_left, input_bottom, input_w, input_h))
     W_in_display = W_in_ordered[:n_input_neurons, :].T  # (input_size, n_input_neurons)
-    im_in = ax_in.imshow(
+    ax_in.imshow(
         W_in_display,
         aspect="auto",
         cmap="RdBu_r",
@@ -194,7 +192,7 @@ def plot_weight_matrices(
     ax_in.set_ylabel("Input Weights", fontsize=10)
 
     # Add colorbar (positioned relative to recurrent matrix)
-    cbar_ax = fig.add_axes([rec_left + rec_w + 0.01, rec_bottom, 0.02, rec_h])
+    cbar_ax = fig.add_axes((rec_left + rec_w + 0.01, rec_bottom, 0.02, rec_h))
     cbar = fig.colorbar(im_rec, cax=cbar_ax)
     cbar.set_label("Weight value", fontsize=10)
 
