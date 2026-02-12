@@ -239,6 +239,7 @@ class Trainer:
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
+            "model_config": self.model.get_config(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "history": self.history,
             "best_val_loss": self.best_val_loss,

@@ -77,6 +77,7 @@ class RateRNN(nn.Module):
         self.alpha = dt / tau
 
         # Initialize activation function
+        self.activation_name = activation
         if activation == "relu":
             self.activation = nn.ReLU()
         elif activation == "tanh":
@@ -218,6 +219,22 @@ class RateRNN(nn.Module):
         mask[n_exc : n_exc + self.n_input_i] = 1.0
         return mask
 
+    def get_config(self) -> dict:
+        """Return constructor arguments needed to recreate this model."""
+        return {
+            "input_size": self.input_size,
+            "hidden_size": self.hidden_size,
+            "dt": self.dt,
+            "tau": self.tau,
+            "activation": self.activation_name,
+            "noise_std": self.noise_std,
+            "dale_ratio": self.dale_ratio,
+            "input_fraction": self.input_fraction,
+            "n_input_e": self.n_input_e,
+            "n_input_i": self.n_input_i,
+            "alpha": self.alpha_rec,
+        }
+
     def apply_dale_constraint(self):
         """Apply Dale's law constraint to recurrent weights."""
         if self.dale_mask is not None:
@@ -232,7 +249,10 @@ class RateRNN(nn.Module):
         inputs: torch.Tensor,
         hidden: Optional[torch.Tensor] = None,
         return_states: bool = False,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
         """
         Forward pass through the RNN.
 

@@ -436,6 +436,7 @@ class Trainer:
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
+            "model_config": self.model.get_config(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "history": self.history,
             "best_val_loss": self.best_val_loss,
@@ -856,7 +857,7 @@ def main():
     )
 
     # Train model
-    trainer.train(n_epochs=1000, save_every=10, plot_every=1000, scheduler=scheduler)
+    trainer.train(n_epochs=1500, save_every=10, plot_every=1500, scheduler=scheduler)
 
     # Load best model
     print("\nLoading best model...")
@@ -931,7 +932,9 @@ def main():
 
     # Plot weight matrices
     print("\nPlotting weight matrices...")
-    plot_weight_matrices(model, method="ward", save_path="./plots/weight_matrices_ward.png", show=False)
+    plot_weight_matrices(
+        model, method="ward", save_path="./plots/weight_matrices_ward.png", show=False
+    )
 
     print("\nTraining complete! Results saved to ./checkpoints/")
 
