@@ -286,7 +286,7 @@ class NeuromodRNN(nn.Module):
             # u_k ⊙ (W @ (v_k ⊙ r))
             u_W_v_r = self.U[:, k] * W_v_r  # (batch, H)
             # Scale by (s_k - 0.5) and accumulate
-            modulation = modulation + s_centered[:, k:k+1] * u_W_v_r
+            modulation = modulation + s_centered[:, k : k + 1] * u_W_v_r
 
         return base_current + modulation
 
@@ -299,7 +299,13 @@ class NeuromodRNN(nn.Module):
     ) -> Union[
         Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
         Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor],
-        Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor],
+        Tuple[
+            torch.Tensor,
+            Tuple[torch.Tensor, torch.Tensor],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
     ]:
         """
         Forward pass through the neuromodulated RNN.
@@ -408,12 +414,10 @@ class NeuromodRNN(nn.Module):
         loss = torch.tensor(0.0, device=self.w_rec.weight.device)
 
         if self.alpha_rec > 0:
-            loss = loss + self.alpha_rec * torch.sum(self.w_rec.weight ** 2)
+            loss = loss + self.alpha_rec * torch.sum(self.w_rec.weight**2)
 
         if self.alpha_nm > 0:
-            loss = loss + self.alpha_nm * (
-                torch.sum(self.U ** 2) + torch.sum(self.V ** 2)
-            )
+            loss = loss + self.alpha_nm * (torch.sum(self.U**2) + torch.sum(self.V**2))
 
         return loss
 

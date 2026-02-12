@@ -420,6 +420,9 @@ class Trainer:
             plt.savefig(
                 self.save_dir / "training_history.png", dpi=150, bbox_inches="tight"
             )
+            # Also save to plots folder
+            Path("./plots").mkdir(parents=True, exist_ok=True)
+            plt.savefig("./plots/training_history.png", dpi=150, bbox_inches="tight")
 
         if show:
             plt.show()
@@ -586,6 +589,9 @@ def plot_neural_analysis(
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    # Also save to plots folder
+    Path("./plots").mkdir(parents=True, exist_ok=True)
+    plt.savefig("./plots/neural_analysis.png", dpi=150, bbox_inches="tight")
 
     if show:
         plt.show()
@@ -723,6 +729,18 @@ def main():
 
     with open("./checkpoints_neuromod/results.json", "w") as f:
         json.dump(results, f, indent=2)
+
+    # Save final plots
+    print("\nSaving final plots...")
+    trainer.plot_training_history(show=False)
+    plot_neural_analysis(
+        model,
+        val_loader,
+        device,
+        save_path="./checkpoints_neuromod/neural_analysis.png",
+        show=False,
+    )
+    plot_weight_matrices(model, save_path="./plots/weight_matrices.png", show=False)
 
     print("\nTraining complete! Results saved to ./checkpoints_neuromod/")
 

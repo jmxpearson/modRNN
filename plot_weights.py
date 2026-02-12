@@ -54,7 +54,7 @@ def _symmetric_clim(*arrays, percentile=99):
 
 def _has_neuromodulation(model) -> bool:
     """Check if model has neuromodulation parameters."""
-    return hasattr(model, 'U') and hasattr(model, 'V') and hasattr(model, 'nm_rank')
+    return hasattr(model, "U") and hasattr(model, "V") and hasattr(model, "nm_rank")
 
 
 def _compute_gain_masks(U: np.ndarray, V: np.ndarray) -> list[np.ndarray]:
@@ -302,7 +302,9 @@ def _plot_dale_layout(
     # Label for recurrent weights (centered below the block)
     rec_center_x = (rec_e_left + rec_i_left + rec_i_w) / 2
     label_y = rec_i_bottom - 0.03
-    fig.text(rec_center_x, label_y, "Recurrent Weights", ha="center", va="top", fontsize=11)
+    fig.text(
+        rec_center_x, label_y, "Recurrent Weights", ha="center", va="top", fontsize=11
+    )
 
     # --- Receptor ratio (if two modulators present) ---
     if gain_masks is not None and len(gain_masks) >= 2:
@@ -346,7 +348,9 @@ def _plot_dale_layout(
 
         # Label for receptor ratio (centered below the block)
         mod_center_x = (mod_e_left + mod_i_left + rec_i_w) / 2
-        fig.text(mod_center_x, label_y, "Receptor ratio", ha="center", va="top", fontsize=11)
+        fig.text(
+            mod_center_x, label_y, "Receptor ratio", ha="center", va="top", fontsize=11
+        )
 
         # Colorbar for ratio
         ratio_cbar_left = mod_i_left + rec_i_w + 0.01
