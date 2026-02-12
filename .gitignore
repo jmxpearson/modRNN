@@ -2,3 +2,4 @@ __pycache__/
 checkpoints/
 plots/
 .claude/
+checkpoints_neuromod/

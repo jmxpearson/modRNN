@@ -53,9 +53,40 @@ def _symmetric_clim(*arrays, percentile=99):
     return -vmax, vmax
 
 
-def _plot_heatmap(ax, data, vmin, vmax, **kwargs):
+def _has_neuromodulation(model) -> bool:
+    """Check if model has neuromodulation parameters."""
+    return hasattr(model, 'U') and hasattr(model, 'V') and hasattr(model, 'nm_rank')
+
+
+def _compute_gain_masks(U: np.ndarray, V: np.ndarray) -> list[np.ndarray]:
+    """Compute log10 of gain masks G_k at s=1 for all ranks.
+
+    The gain mask formula is: G = softplus(1 + U diag(s - 0.5) V^T)
+    At s=1, this becomes: G_k = softplus(1 + 0.5 * U[:,k] @ V[:,k].T)
+    Returns log10(G_k) for more informative visualization.
+    """
+    nm_rank = U.shape[1]
+    masks = []
+    for k in range(nm_rank):
+        uv_outer = np.outer(U[:, k], V[:, k])
+        G_k = np.log1p(np.exp(1 + 0.5 * uv_outer))  # softplus
+        masks.append(np.log10(G_k))  # log10 for visualization
+    return masks
+
+
+def _mask_clim(*masks, percentile=99):
+    """Compute symmetric color limits centered at 0 for log10 gain masks.
+
+    Uses percentile to avoid saturation from outliers.
+    """
+    combined = np.concatenate([m.flatten() for m in masks])
+    max_dev = float(np.percentile(np.abs(combined), percentile))
+    return -max_dev, max_dev
+
+
+def _plot_heatmap(ax, data, vmin, vmax, cmap="RdBu_r", **kwargs):
     """Plot a weight matrix heatmap with common defaults."""
-    im = ax.imshow(data, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+    im = ax.imshow(data, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
     ax.set_xticks([])
     ax.set_yticks([])
     for k, v in kwargs.items():
@@ -98,6 +129,12 @@ def _extract_weights(model, method):
         W_in = W_in[col_order, :]
         W_out = W_out[:, row_order]
 
+    # Check for neuromodulation parameters
+    has_neuromod = _has_neuromodulation(model)
+    nm_rank = model.nm_rank if has_neuromod else 0
+    U = model.U.detach().cpu().numpy() if has_neuromod else None
+    V = model.V.detach().cpu().numpy() if has_neuromod else None
+
     return {
         "W_in": W_in,
         "W_rec": W_rec,
@@ -111,6 +148,10 @@ def _extract_weights(model, method):
         "n_input_i": n_input_i,
         "n_input_neurons": n_input_neurons,
         "method": method,
+        "has_neuromod": has_neuromod,
+        "nm_rank": nm_rank,
+        "U": U,
+        "V": V,
     }
 
 
@@ -126,40 +167,55 @@ def _plot_dale_layout(
     n_exc,
     n_input_e,
     n_input_i,
+    gain_masks=None,
 ):
-    """Create the Dale's law weight matrix layout.
+    """Create the Dale's law weight matrix layout with optional neuromodulation masks.
 
-    Layout: [Out_E] [gap] [E->E] [gap] [I->E]
-            [gap]         [gap]        [gap]
-            [Out_I] [gap] [E->I] [gap] [I->I]
-                          [E_in]       [I_in]
+    Layout without neuromod:
+        [Out_E] [gap] [E->E] [gap] [I->E]
+        [Out_I] [gap] [E->I] [gap] [I->I]
+                      [E_in]       [I_in]
+
+    Layout with neuromod (nm_rank masks to the right):
+        [Out_E] [E->E] [I->E] |cbar| <nm_gap> [G1_EE] [G1_IE] ... |mask_cbar|
+        [Out_I] [E->I] [I->I]                 [G1_EI] [G1_II]
+                [E_in] [I_in]
     """
+    nm_rank = len(gain_masks) if gain_masks is not None else 0
+
     margin_left = 0.08
     margin_right = 0.12
     margin_bottom = 0.08
     margin_top = 0.08
     gap = 0.10
 
-    total_width = 1.0 - margin_left - margin_right
     total_height = 1.0 - margin_bottom - margin_top
 
     output_rel = 0.5
     input_height_rel = 1.5
     rec_height_rel = 8.0
-    fig_width = 10.0
 
     n_inh = hidden_size - n_exc
     rec_e_rel = 8.0 * (n_exc / hidden_size)
     rec_i_rel = 8.0 * (n_inh / hidden_size)
     inner_gap_rel = gap * 0.5
+    nm_gap_rel = gap * 2.0  # Larger gap before modulator section
 
-    # Horizontal layout
-    total_width_rel = output_rel + gap + rec_e_rel + inner_gap_rel + rec_i_rel
+    # Calculate total width including modulator blocks
+    base_width_rel = output_rel + gap + rec_e_rel + inner_gap_rel + rec_i_rel
+    mod_block_rel = rec_e_rel + inner_gap_rel + rec_i_rel  # Each mod block same as rec
+    total_width_rel = base_width_rel + nm_rank * (nm_gap_rel + mod_block_rel)
+
+    # Scale figure width based on content
+    fig_width = 10.0 * (1 + 0.5 * nm_rank)
+    total_width = 1.0 - margin_left - margin_right
+
     output_w = (output_rel / total_width_rel) * total_width
     rec_e_w = (rec_e_rel / total_width_rel) * total_width
     rec_i_w = (rec_i_rel / total_width_rel) * total_width
     gap_w = (gap / total_width_rel) * total_width
     inner_gap_w = (inner_gap_rel / total_width_rel) * total_width
+    nm_gap_w = (nm_gap_rel / total_width_rel) * total_width
 
     output_left = margin_left
     rec_e_left = output_left + output_w + gap_w
@@ -236,19 +292,61 @@ def _plot_dale_layout(
         ax_in_i = fig.add_axes((rec_i_left, input_bottom, input_i_w, input_h))
         _plot_heatmap(ax_in_i, W_in_i, vmin, vmax, xlabel="Inhibitory")
 
-    # Colorbar (right of top-right block)
+    # Colorbar for recurrent weights (right of recurrent block)
+    cbar_left = rec_i_left + rec_i_w + 0.01
     cbar_ax = fig.add_axes(
-        (
-            rec_i_left + rec_i_w + 0.01,
-            rec_i_bottom,
-            0.02,
-            rec_e_h + inner_gap_h + rec_i_h,
-        )
+        (cbar_left, rec_i_bottom, 0.02, rec_e_h + inner_gap_h + rec_i_h)
     )
     cbar = fig.colorbar(im_rec, cax=cbar_ax)
     cbar.set_label("Weight value", fontsize=10)
 
-    plt.suptitle("Weight Matrices", fontsize=14)
+    # Label for recurrent weights (centered below the block)
+    rec_center_x = (rec_e_left + rec_i_left + rec_i_w) / 2
+    label_y = rec_i_bottom - 0.03
+    fig.text(rec_center_x, label_y, "Recurrent Weights", ha="center", va="top", fontsize=11)
+
+    # --- Receptor ratio (if two modulators present) ---
+    if gain_masks is not None and len(gain_masks) >= 2:
+        # Compute log ratio: log10(G1/G2) = log10(G1) - log10(G2)
+        ratio_mask = gain_masks[0] - gain_masks[1]
+
+        # Split ratio into quadrants
+        R_ee = ratio_mask[:n_exc, :n_exc]
+        R_ie = ratio_mask[:n_exc, n_exc:]
+        R_ei = ratio_mask[n_exc:, :n_exc]
+        R_ii = ratio_mask[n_exc:, n_exc:]
+
+        # Position for ratio block (after colorbar + larger gap)
+        mod_base_left = cbar_left + 0.06 + nm_gap_w
+        mod_e_left = mod_base_left
+        mod_i_left = mod_e_left + rec_e_w + inner_gap_w
+
+        # Top row (to E)
+        ax_ree = fig.add_axes((mod_e_left, rec_e_bottom, rec_e_w, rec_e_h))
+        _plot_heatmap(ax_ree, R_ee, None, None, cmap="viridis", title="From E")
+
+        ax_rie = fig.add_axes((mod_i_left, rec_e_bottom, rec_i_w, rec_e_h))
+        _plot_heatmap(ax_rie, R_ie, None, None, cmap="viridis", title="From I")
+
+        # Bottom row (to I)
+        ax_rei = fig.add_axes((mod_e_left, rec_i_bottom, rec_e_w, rec_i_h))
+        _plot_heatmap(ax_rei, R_ei, None, None, cmap="viridis")
+
+        ax_rii = fig.add_axes((mod_i_left, rec_i_bottom, rec_i_w, rec_i_h))
+        im_ratio = _plot_heatmap(ax_rii, R_ii, None, None, cmap="viridis")
+
+        # Label for receptor ratio (centered below the block)
+        mod_center_x = (mod_e_left + mod_i_left + rec_i_w) / 2
+        fig.text(mod_center_x, label_y, "Receptor ratio", ha="center", va="top", fontsize=11)
+
+        # Colorbar for ratio
+        ratio_cbar_left = mod_i_left + rec_i_w + 0.01
+        ratio_cbar_ax = fig.add_axes(
+            (ratio_cbar_left, rec_i_bottom, 0.02, rec_e_h + inner_gap_h + rec_i_h)
+        )
+        ratio_cbar = fig.colorbar(im_ratio, cax=ratio_cbar_ax)
+        ratio_cbar.set_label("log10(G1/G2)", fontsize=10)
+
     return fig
 
 
@@ -366,6 +464,11 @@ def plot_weight_matrices(
     w = _extract_weights(model, method)
     vmin, vmax = _symmetric_clim(w["W_rec"], w["W_in"], w["W_out"])
 
+    # Compute gain masks if model has neuromodulation
+    gain_masks = None
+    if w["has_neuromod"] and w["nm_rank"] > 0:
+        gain_masks = _compute_gain_masks(w["U"], w["V"])
+
     # Input feature labels
     input_labels = ["fixation", "test_side", "go_cue", "hold_cue"] + [
         f"chk{i}" for i in range(w["input_size"] - 4)
@@ -384,6 +487,7 @@ def plot_weight_matrices(
             w["n_exc"],
             w["n_input_e"],
             w["n_input_i"],
+            gain_masks=gain_masks,
         )
     else:
         fig = _plot_standard_layout(
