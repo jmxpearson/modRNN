@@ -97,14 +97,14 @@ class RateRNN(nn.Module):
         # Output weights - linear readout producing scalar at each timestep
         self.w_out = nn.Linear(hidden_size, 1, bias=True)
 
-        # Initialize weights
-        self._initialize_weights()
-
-        # Dale's law mask (if enabled)
+        # Dale's law mask (if enabled) - must be created before weight init
         if dale_ratio is not None:
             self.register_buffer("dale_mask", self._create_dale_mask())
         else:
             self.dale_mask = None
+
+        # Initialize weights (uses dale_mask if present)
+        self._initialize_weights()
 
         # Input mask (if enabled) - only a fraction of neurons receive task input
         if n_input_e is not None and n_input_i is not None:
@@ -123,16 +123,33 @@ class RateRNN(nn.Module):
         # Input weights: Gaussian with small variance
         nn.init.normal_(self.w_in.weight, mean=0.0, std=1.0 / np.sqrt(self.input_size))
 
-        # Recurrent weights: random Gaussian, then rescale to target spectral radius
+        # Recurrent weights: random Gaussian, then apply Dale constraint,
+        # then rescale to target spectral radius.
+        # The Dale constraint (abs + sign mask) changes the spectral radius
+        # dramatically, so we must apply it BEFORE rescaling.
         nn.init.normal_(
             self.w_rec.weight, mean=0.0, std=1.0 / np.sqrt(self.hidden_size)
         )
         with torch.no_grad():
+            # Apply Dale's constraint before measuring spectral radius
+            if self.dale_mask is not None:
+                self.w_rec.weight.data = (
+                    torch.abs(self.w_rec.weight.data) * self.dale_mask
+                )
             eigvals = torch.linalg.eigvals(self.w_rec.weight)
             current_radius = eigvals.abs().max().item()
             if current_radius > 0:
                 self.w_rec.weight.mul_(spectral_radius / current_radius)
+
+        # Bias initialization
         nn.init.constant_(self.w_rec.bias, 0.0)
+        # Give inhibitory neurons a positive bias so they are active from
+        # the start and can suppress excitatory runaway.
+        # Without this, ReLU(0)=0 means no inhibition at initialization.
+        if self.dale_ratio is not None:
+            n_exc = int(self.dale_ratio * self.hidden_size)
+            with torch.no_grad():
+                self.w_rec.bias[n_exc:] = 1.0
 
         # Output weights: scaled so initial output std is O(1)
         nn.init.normal_(
@@ -151,7 +168,7 @@ class RateRNN(nn.Module):
         assert self.dale_ratio is not None, "dale_ratio must be set to create Dale mask"
         n_exc = int(self.dale_ratio * self.hidden_size)
         mask = torch.ones(self.hidden_size, self.hidden_size)
-        mask[n_exc:, :] = -1  # Last (1-dale_ratio) fraction are inhibitory
+        mask[:, n_exc:] = -1  # Columns for inhibitory neurons: all outputs negative
         return mask
 
     def _create_input_mask(self) -> torch.Tensor:
@@ -360,12 +377,13 @@ def train_step(
     # Backward pass
     total_loss.backward()
 
-    # Apply Dale's law constraint if enabled
-    if model.dale_mask is not None:
-        model.apply_dale_constraint()
-
     # Update weights
     optimizer.step()
+
+    # Apply Dale's law constraint after optimizer step
+    # so the weights remain Dale-compliant
+    if model.dale_mask is not None:
+        model.apply_dale_constraint()
 
     return task_loss.item(), reg_loss.item()
 

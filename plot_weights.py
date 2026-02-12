@@ -77,31 +77,37 @@ def plot_weight_matrices(
 
     hidden_size, input_size = W_in.shape
 
-    # Determine how many neurons receive input
+    # Determine Dale's law configuration
+    dale_ratio = model.dale_ratio
+    dale_active = dale_ratio is not None
+    n_exc = int(dale_ratio * hidden_size) if dale_ratio is not None else 0
+    n_input_e = model.n_input_e if model.n_input_e is not None else 0
+    n_input_i = model.n_input_i if model.n_input_i is not None else 0
+
+    # Determine how many neurons receive input (non-Dale case)
     if model.input_fraction is not None:
         n_input_neurons = int(model.input_fraction * hidden_size)
-    else:
+    elif not dale_active:
         n_input_neurons = hidden_size
+    else:
+        n_input_neurons = 0  # handled by Dale split below
 
-    # Cluster the recurrent matrix - separate orderings for rows and columns
-    row_order, col_order = cluster_and_reorder(W_rec, method=method)
-
-    # Reorder matrices according to clustering
-    # Recurrent: rows reordered by row_order, cols reordered by col_order
-    W_rec_ordered = W_rec[np.ix_(row_order, col_order)]
-    # Input weights: rows of W_in are hidden neurons, cols are input features
-    # Permute rows by col_order so input matrix columns align with recurrent matrix columns
-    W_in_ordered = W_in[col_order, :]
-    # Output weights: rows of W_out read from hidden neurons
-    # So permute cols of W_out by row_order (to align with recurrent rows when transposed left)
-    W_out_ordered = W_out[:, row_order]
+    # Cluster the recurrent matrix (non-Dale case only)
+    if not dale_active:
+        row_order, col_order = cluster_and_reorder(W_rec, method=method)
+        W_rec = W_rec[np.ix_(row_order, col_order)]
+        W_in = W_in[col_order, :]
+        W_out = W_out[:, row_order]
 
     # Compute color scale limits (symmetric around 0)
-    all_weights = np.concatenate([W_rec_ordered.flatten(),
-                                   W_in_ordered.flatten(),
-                                   W_out_ordered.flatten()])
+    all_weights = np.concatenate([W_rec.flatten(),
+                                   W_in.flatten(),
+                                   W_out.flatten()])
     vmax = float(np.percentile(np.abs(all_weights), 99))
     vmin = -vmax
+
+    # Input feature labels
+    input_labels = ["fixation", "test_side", "go_cue", "hold_cue"] + [f"chk{i}" for i in range(input_size - 4)]
 
     # Create figure with manual axes positioning for precise alignment
     # All positions in normalized figure coordinates [left, bottom, width, height]
@@ -117,86 +123,190 @@ def plot_weight_matrices(
 
     # Relative sizes (in arbitrary units, will be normalized)
     output_rel = 0.5
-    rec_rel = 8.0
     input_height_rel = 1.5
     rec_height_rel = 8.0
 
-    # Normalize widths
-    total_width_rel = output_rel + gap + rec_rel
-    output_w = (output_rel / total_width_rel) * total_width
-    rec_w = (rec_rel / total_width_rel) * total_width
-    gap_w = (gap / total_width_rel) * total_width
-
-    # Normalize heights
+    # Normalize heights (same for both layouts)
     total_height_rel = rec_height_rel + gap + input_height_rel
     rec_h = (rec_height_rel / total_height_rel) * total_height
     input_h = (input_height_rel / total_height_rel) * total_height
     gap_h = (gap / total_height_rel) * total_height
 
-    # Input width is fraction of recurrent width
-    input_w = rec_w * (n_input_neurons / hidden_size)
+    fig_width = 10.0
+    fig_height = fig_width * (total_height_rel / (output_rel + gap + 8.0)) * 1.1
 
-    # Calculate positions
-    output_left = margin_left
-    rec_left = output_left + output_w + gap_w
     rec_bottom = margin_bottom + input_h + gap_h
     input_bottom = margin_bottom
 
-    fig_width = 10.0
-    fig_height = fig_width * (total_height_rel / total_width_rel) * 1.1
-    fig = plt.figure(figsize=(fig_width, fig_height))
+    if dale_active:
+        # Layout: [Out_E] [gap] [E→E] [gap] [I→E]
+        #         [gap]         [gap]        [gap]
+        #         [Out_I] [gap] [E→I] [gap] [I→I]
+        #                       [E_in]      [I_in]
+        n_inh = hidden_size - n_exc
+        rec_e_rel = 8.0 * (n_exc / hidden_size)
+        rec_i_rel = 8.0 * (n_inh / hidden_size)
+        inner_gap_rel = gap * 0.5
 
-    # Output weights (left of recurrent)
-    ax_out = fig.add_axes((output_left, rec_bottom, output_w, rec_h))
-    ax_out.imshow(
-        W_out_ordered.T,  # (hidden, 1)
-        aspect="auto",
-        cmap="RdBu_r",
-        vmin=vmin,
-        vmax=vmax,
-    )
-    ax_out.set_ylabel("To neuron (clustered)", fontsize=10)
-    ax_out.set_title("Output\nWeights", fontsize=10)
-    ax_out.set_xticks([])
-    ax_out.set_yticks([])
+        # Horizontal layout
+        total_width_rel = output_rel + gap + rec_e_rel + inner_gap_rel + rec_i_rel
+        output_w = (output_rel / total_width_rel) * total_width
+        rec_e_w = (rec_e_rel / total_width_rel) * total_width
+        rec_i_w = (rec_i_rel / total_width_rel) * total_width
+        gap_w = (gap / total_width_rel) * total_width
+        inner_gap_w = (inner_gap_rel / total_width_rel) * total_width
 
-    # Recurrent weights
-    ax_rec = fig.add_axes((rec_left, rec_bottom, rec_w, rec_h))
-    im_rec = ax_rec.imshow(
-        W_rec_ordered,
-        aspect="auto",  # use auto to fill axes exactly
-        cmap="RdBu_r",
-        vmin=vmin,
-        vmax=vmax,
-    )
-    ax_rec.set_title(f"Recurrent Weights (clustered: {method})", fontsize=12)
-    ax_rec.set_xticks([])
-    ax_rec.set_yticks([])
+        output_left = margin_left
+        rec_e_left = output_left + output_w + gap_w
+        rec_i_left = rec_e_left + rec_e_w + inner_gap_w
 
-    # Input weights (below left portion of recurrent) - aligned with rec_left
-    ax_in = fig.add_axes((rec_left, input_bottom, input_w, input_h))
-    W_in_display = W_in_ordered[:n_input_neurons, :].T  # (input_size, n_input_neurons)
-    ax_in.imshow(
-        W_in_display,
-        aspect="auto",
-        cmap="RdBu_r",
-        vmin=vmin,
-        vmax=vmax,
-    )
-    ax_in.set_xlabel("To neuron (clustered)", fontsize=10)
-    ax_in.set_xticks([])
-    # Label input features on y-axis
-    input_labels = ["fixation", "test_side", "go_cue", "hold_cue"] + [f"chk{i}" for i in range(input_size - 4)]
-    ax_in.set_yticks(range(input_size))
-    ax_in.set_yticklabels(input_labels, fontsize=8)
-    ax_in.set_ylabel("Input Weights", fontsize=10)
+        # Vertical layout: split recurrent height into E-target and I-target rows
+        rec_e_h_rel = rec_height_rel * (n_exc / hidden_size)
+        rec_i_h_rel = rec_height_rel * (n_inh / hidden_size)
+        total_height_rel = rec_e_h_rel + inner_gap_rel + rec_i_h_rel + gap + input_height_rel
+        rec_e_h = (rec_e_h_rel / total_height_rel) * total_height
+        rec_i_h = (rec_i_h_rel / total_height_rel) * total_height
+        inner_gap_h = (inner_gap_rel / total_height_rel) * total_height
+        input_h = (input_height_rel / total_height_rel) * total_height
+        gap_h = (gap / total_height_rel) * total_height
 
-    # Add colorbar (positioned relative to recurrent matrix)
-    cbar_ax = fig.add_axes((rec_left + rec_w + 0.01, rec_bottom, 0.02, rec_h))
-    cbar = fig.colorbar(im_rec, cax=cbar_ax)
-    cbar.set_label("Weight value", fontsize=10)
+        # Vertical positions (bottom to top)
+        input_bottom = margin_bottom
+        rec_i_bottom = input_bottom + input_h + gap_h
+        rec_e_bottom = rec_i_bottom + rec_i_h + inner_gap_h
 
-    plt.suptitle("Weight Matrices Visualization", fontsize=14)
+        fig_height = fig_width * (total_height_rel / total_width_rel) * 1.1
+        fig = plt.figure(figsize=(fig_width, fig_height))
+
+        # Split recurrent matrix into 4 quadrants
+        # W_rec[i, j] = connection from j to i
+        # Rows = "to" neuron, Cols = "from" neuron
+        W_ee = W_rec[:n_exc, :n_exc]       # from E to E
+        W_ie = W_rec[:n_exc, n_exc:]       # from I to E
+        W_ei = W_rec[n_exc:, :n_exc]       # from E to I
+        W_ii = W_rec[n_exc:, n_exc:]       # from I to I
+
+        # Split output weights: W_out has shape (1, hidden)
+        W_out_e = W_out[:, :n_exc]         # reading from E neurons
+        W_out_i = W_out[:, n_exc:]         # reading from I neurons
+
+        # --- Top row: "to excitatory" ---
+        # Output weights (E targets)
+        ax_out_e = fig.add_axes((output_left, rec_e_bottom, output_w, rec_e_h))
+        ax_out_e.imshow(W_out_e.T, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_out_e.set_ylabel("To E", fontsize=10)
+        ax_out_e.set_title("Output\nWeights", fontsize=10)
+        ax_out_e.set_xticks([])
+        ax_out_e.set_yticks([])
+
+        # E→E
+        ax_ee = fig.add_axes((rec_e_left, rec_e_bottom, rec_e_w, rec_e_h))
+        im_rec = ax_ee.imshow(W_ee, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_ee.set_title("From Excitatory", fontsize=11)
+        ax_ee.set_xticks([])
+        ax_ee.set_yticks([])
+
+        # I→E
+        ax_ie = fig.add_axes((rec_i_left, rec_e_bottom, rec_i_w, rec_e_h))
+        ax_ie.imshow(W_ie, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_ie.set_title("From Inhibitory", fontsize=11)
+        ax_ie.set_xticks([])
+        ax_ie.set_yticks([])
+
+        # --- Bottom row: "to inhibitory" ---
+        # Output weights (I targets)
+        ax_out_i = fig.add_axes((output_left, rec_i_bottom, output_w, rec_i_h))
+        ax_out_i.imshow(W_out_i.T, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_out_i.set_ylabel("To I", fontsize=10)
+        ax_out_i.set_xticks([])
+        ax_out_i.set_yticks([])
+
+        # E→I
+        ax_ei = fig.add_axes((rec_e_left, rec_i_bottom, rec_e_w, rec_i_h))
+        ax_ei.imshow(W_ei, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_ei.set_xticks([])
+        ax_ei.set_yticks([])
+
+        # I→I
+        ax_ii = fig.add_axes((rec_i_left, rec_i_bottom, rec_i_w, rec_i_h))
+        ax_ii.imshow(W_ii, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_ii.set_xticks([])
+        ax_ii.set_yticks([])
+
+        # --- Input weights (below bottom row) ---
+        if n_input_e > 0:
+            W_in_e = W_in[0:n_input_e, :].T
+            input_e_w = rec_e_w * (n_input_e / n_exc)
+            ax_in_e = fig.add_axes((rec_e_left, input_bottom, input_e_w, input_h))
+            ax_in_e.imshow(W_in_e, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+            ax_in_e.set_xlabel("Excitatory", fontsize=9)
+            ax_in_e.set_xticks([])
+            ax_in_e.set_yticks(range(input_size))
+            ax_in_e.set_yticklabels(input_labels, fontsize=8)
+            ax_in_e.set_ylabel("Input Weights", fontsize=10)
+
+        if n_input_i > 0:
+            W_in_i = W_in[n_exc:n_exc+n_input_i, :].T
+            input_i_w = rec_i_w * (n_input_i / n_inh)
+            ax_in_i = fig.add_axes((rec_i_left, input_bottom, input_i_w, input_h))
+            ax_in_i.imshow(W_in_i, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+            ax_in_i.set_xlabel("Inhibitory", fontsize=9)
+            ax_in_i.set_xticks([])
+            ax_in_i.set_yticks([])
+
+        # Colorbar (right of top-right block)
+        cbar_ax = fig.add_axes((rec_i_left + rec_i_w + 0.01, rec_i_bottom, 0.02, rec_e_h + inner_gap_h + rec_i_h))
+        cbar = fig.colorbar(im_rec, cax=cbar_ax)
+        cbar.set_label("Weight value", fontsize=10)
+
+        plt.suptitle("Weight Matrices", fontsize=14)
+
+    else:
+        # Non-Dale layout: [Output] [gap] [Recurrent]
+        #                            [Input]
+        rec_rel = 8.0
+        total_width_rel = output_rel + gap + rec_rel
+        output_w = (output_rel / total_width_rel) * total_width
+        rec_w = (rec_rel / total_width_rel) * total_width
+        gap_w = (gap / total_width_rel) * total_width
+        input_w = rec_w * (n_input_neurons / hidden_size)
+
+        output_left = margin_left
+        rec_left = output_left + output_w + gap_w
+
+        fig = plt.figure(figsize=(fig_width, fig_height))
+
+        # Output weights
+        ax_out = fig.add_axes((output_left, rec_bottom, output_w, rec_h))
+        ax_out.imshow(W_out.T, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_out.set_ylabel("To neuron (clustered)", fontsize=10)
+        ax_out.set_title("Output\nWeights", fontsize=10)
+        ax_out.set_xticks([])
+        ax_out.set_yticks([])
+
+        # Recurrent weights
+        ax_rec = fig.add_axes((rec_left, rec_bottom, rec_w, rec_h))
+        im_rec = ax_rec.imshow(W_rec, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_rec.set_title(f"Recurrent Weights (clustered: {method})", fontsize=12)
+        ax_rec.set_xticks([])
+        ax_rec.set_yticks([])
+
+        # Input weights
+        ax_in = fig.add_axes((rec_left, input_bottom, input_w, input_h))
+        W_in_display = W_in[:n_input_neurons, :].T
+        ax_in.imshow(W_in_display, aspect="auto", cmap="RdBu_r", vmin=vmin, vmax=vmax)
+        ax_in.set_xlabel("To neuron (clustered)", fontsize=10)
+        ax_in.set_xticks([])
+        ax_in.set_yticks(range(input_size))
+        ax_in.set_yticklabels(input_labels, fontsize=8)
+        ax_in.set_ylabel("Input Weights", fontsize=10)
+
+        # Colorbar
+        cbar_ax = fig.add_axes((rec_left + rec_w + 0.01, rec_bottom, 0.02, rec_h))
+        cbar = fig.colorbar(im_rec, cax=cbar_ax)
+        cbar.set_label("Weight value", fontsize=10)
+
+        plt.suptitle("Weight Matrices Visualization", fontsize=14)
 
     # Ensure directory exists
     from pathlib import Path
@@ -224,8 +334,9 @@ if __name__ == "__main__":
         tau=100.0,
         activation="relu",
         noise_std=0.01,
-        dale_ratio=None,
-        input_fraction=0.125,  # 1/8 of neurons receive task input
+        dale_ratio=0.8,
+        n_input_e=32,
+        n_input_i=32,
         alpha=1e-5,
         device=device,
     ).to(device)

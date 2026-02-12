@@ -213,15 +213,16 @@ class Trainer:
             # Backward pass
             total_loss.backward()
 
-            # Apply Dale's law constraint if enabled
-            if self.model.dale_mask is not None:
-                self.model.apply_dale_constraint()
-
             # Gradient clipping (optional but recommended)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
             # Update weights
             self.optimizer.step()
+
+            # Apply Dale's law constraint after optimizer step
+            # so the weights remain Dale-compliant
+            if self.model.dale_mask is not None:
+                self.model.apply_dale_constraint()
 
             # Record losses
             total_losses.append(total_loss.item())
@@ -855,7 +856,7 @@ def main():
     )
 
     # Train model
-    trainer.train(n_epochs=1000, save_every=10, plot_every=25, scheduler=scheduler)
+    trainer.train(n_epochs=1000, save_every=10, plot_every=1000, scheduler=scheduler)
 
     # Load best model
     print("\nLoading best model...")
