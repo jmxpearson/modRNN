@@ -5,7 +5,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.cluster.hierarchy import linkage, leaves_list
-from model import RateRNN
 
 
 def _spectral_order(similarity: np.ndarray) -> np.ndarray:
@@ -310,11 +309,21 @@ def _plot_dale_layout(
         # Compute log ratio: log10(G1/G2) = log10(G1) - log10(G2)
         ratio_mask = gain_masks[0] - gain_masks[1]
 
-        # Split ratio into quadrants
+        # Split into quadrants first
         R_ee = ratio_mask[:n_exc, :n_exc]
         R_ie = ratio_mask[:n_exc, n_exc:]
         R_ei = ratio_mask[n_exc:, :n_exc]
         R_ii = ratio_mask[n_exc:, n_exc:]
+
+        # Cluster E and I neurons separately (using E->E and I->I blocks)
+        e_row_order, e_col_order = cluster_and_reorder(R_ee, method="spectral")
+        i_row_order, i_col_order = cluster_and_reorder(R_ii, method="spectral")
+
+        # Reorder each quadrant using the appropriate orderings
+        R_ee = R_ee[np.ix_(e_row_order, e_col_order)]
+        R_ie = R_ie[np.ix_(e_row_order, i_col_order)]
+        R_ei = R_ei[np.ix_(i_row_order, e_col_order)]
+        R_ii = R_ii[np.ix_(i_row_order, i_col_order)]
 
         # Position for ratio block (after colorbar + larger gap)
         mod_base_left = cbar_left + 0.06 + nm_gap_w
@@ -444,7 +453,7 @@ def _plot_standard_layout(
 
 
 def plot_weight_matrices(
-    model: RateRNN,
+    model,
     method: str = "ward",
     save_path: str = "./plots/weight_matrices.png",
     show: bool = True,
@@ -456,7 +465,7 @@ def plot_weight_matrices(
     permuted accordingly so edges align when displayed together.
 
     Args:
-        model: Trained RateRNN model
+        model: Trained RateRNN or NeuromodRNN model
         method: Clustering method - "ward" (hierarchical) or "spectral"
         save_path: Path to save the figure
         show: Whether to display the plot
@@ -514,30 +523,16 @@ def plot_weight_matrices(
 
 
 if __name__ == "__main__":
+    from neuromod_model import NeuromodRNN
+
     device = "cpu"
-    checkpoint = torch.load("./checkpoints/best_model.pt", map_location=device)
+    checkpoint = torch.load("./checkpoints_neuromod/best_model.pt", map_location=device)
 
     config = checkpoint["model_config"]
     config.pop("device", None)
-    model = RateRNN(**config, device=device).to(device)
+    model = NeuromodRNN(**config, device=device).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
     print(f"Loaded model from epoch {checkpoint['epoch']}")
 
-    if model.dale_ratio is not None:
-        # Dale's law: no clustering, so one plot suffices
-        plot_weight_matrices(model, save_path="./plots/weight_matrices.png", show=False)
-    else:
-        # Plot with both clustering methods
-        plot_weight_matrices(
-            model,
-            method="ward",
-            save_path="./plots/weight_matrices_ward.png",
-            show=False,
-        )
-        plot_weight_matrices(
-            model,
-            method="spectral",
-            save_path="./plots/weight_matrices_spectral.png",
-            show=False,
-        )
+    plot_weight_matrices(model, save_path="./plots/weight_matrices.png", show=False)
